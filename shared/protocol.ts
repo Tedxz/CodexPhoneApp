@@ -72,12 +72,16 @@ export interface Project {
   name: string;
   path: string;
 }
+export type ClientType = 'harmony' | 'browser';
 export interface Device {
   id: string;
   name: string;
   createdAt: number;
   expiresAt: number;
   current?: boolean;
+  clientType?: ClientType;
+  lastSeenAt?: number;
+  authorizationCount?: number;
 }
 export interface ConnectionState {
   connected: boolean;

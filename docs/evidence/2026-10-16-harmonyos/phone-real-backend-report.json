@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-15T23:02:40.308Z",
+  "threadId": "01a141cc-388d-7772-be8b-80438de38621",
+  "method": "Read-only snapshot from the Funnel gateway process after physical native UI completed",
+  "threadStatus": "idle",
+  "userMessageCount": 1,
+  "assistantMessageCount": 1,
+  "exactMarker": true,
+  "tools": 0,
+  "itemTypes": [
+    "userMessage",
+    "agentMessage"
+  ],
+  "liveDeltaCount": null,
+  "liveDeltaNote": "The initial observer connected to the separate LAN gateway process and did not observe the Funnel turn. No resend was performed; completed history was independently verified instead.",
+  "observerDeviceRevoked": true
+}

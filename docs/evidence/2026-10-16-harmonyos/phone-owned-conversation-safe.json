@@ -1,0 +1,353 @@
+{
+  "capturedAt": "2026-10-15T23:03:24.990Z",
+  "scope": "Own test conversation only; no credential, device identifier, other conversation, directory list or device list.",
+  "threadId": "01a141cc-388d-7772-be8b-80438de38621",
+  "appContent": [
+    {
+      "bounds": [
+        0,
+        0,
+        1320,
+        2848
+      ],
+      "children": [
+        {
+          "type": "root",
+          "bounds": [
+            0,
+            132,
+            1320,
+            2848
+          ],
+          "children": [
+            {
+              "type": "Column",
+              "bounds": [
+                0,
+                132,
+                1320,
+                2754
+              ],
+              "children": [
+                {
+                  "type": "Row",
+                  "bounds": [
+                    0,
+                    132,
+                    1320,
+                    388
+                  ],
+                  "children": [
+                    {
+                      "type": "Button",
+                      "bounds": [
+                        54,
+                        185,
+                        203,
+                        334
+                      ],
+                      "id": "back-to-threads",
+                      "text": "‹"
+                    },
+                    {
+                      "type": "Column",
+                      "bounds": [
+                        236,
+                        195,
+                        1084,
+                        324
+                      ],
+                      "children": [
+                        {
+                          "type": "Text",
+                          "bounds": [
+                            236,
+                            195,
+                            1084,
+                            266
+                          ],
+                          "text": "Only_reply:HARMONY_PHONE_REAL_OK.Do_not_use_tools_or_modify_files."
+                        },
+                        {
+                          "type": "Text",
+                          "bounds": [
+                            236,
+                            280,
+                            1084,
+                            324
+                          ],
+                          "text": "/Users/xiezheng/Code/CodexPhoneApp"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "Button",
+                      "bounds": [
+                        1118,
+                        185,
+                        1267,
+                        334
+                      ],
+                      "text": "↻"
+                    }
+                  ]
+                },
+                {
+                  "type": "List",
+                  "bounds": [
+                    0,
+                    388,
+                    1320,
+                    2195
+                  ],
+                  "children": [
+                    {
+                      "type": "ListItem",
+                      "bounds": [
+                        54,
+                        388,
+                        1266,
+                        754
+                      ],
+                      "children": [
+                        {
+                          "type": "Column",
+                          "bounds": [
+                            54,
+                            388,
+                            1266,
+                            754
+                          ],
+                          "children": [
+                            {
+                              "type": "Text",
+                              "bounds": [
+                                114,
+                                448,
+                                157,
+                                492
+                              ],
+                              "text": "你"
+                            },
+                            {
+                              "type": "Text",
+                              "bounds": [
+                                114,
+                                526,
+                                1206,
+                                694
+                              ],
+                              "text": "Only_reply:HARMONY_PHONE_REAL_OK.Do_not_use_tools_or_modify_files."
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "ListItem",
+                      "bounds": [
+                        54,
+                        801,
+                        1266,
+                        1083
+                      ],
+                      "children": [
+                        {
+                          "type": "Column",
+                          "bounds": [
+                            54,
+                            801,
+                            1266,
+                            1083
+                          ],
+                          "children": [
+                            {
+                              "type": "Text",
+                              "bounds": [
+                                114,
+                                861,
+                                266,
+                                905
+                              ],
+                              "text": "CODEX"
+                            },
+                            {
+                              "type": "Column",
+                              "bounds": [
+                                114,
+                                939,
+                                1206,
+                                1023
+                              ],
+                              "children": [
+                                {
+                                  "type": "Text",
+                                  "bounds": [
+                                    114,
+                                    939,
+                                    1206,
+                                    1023
+                                  ],
+                                  "text": "HARMONY_PHONE_REAL_OK"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "ListItem",
+                      "bounds": [
+                        54,
+                        1130,
+                        1266,
+                        1252
+                      ],
+                      "children": [
+                        {
+                          "type": "Row",
+                          "bounds": [
+                            54,
+                            1130,
+                            1266,
+                            1252
+                          ],
+                          "children": [
+                            {
+                              "type": "Text",
+                              "bounds": [
+                                94,
+                                1171,
+                                111,
+                                1211
+                              ],
+                              "text": "·"
+                            },
+                            {
+                              "type": "Text",
+                              "bounds": [
+                                131,
+                                1167,
+                                212,
+                                1214
+                              ],
+                              "text": "就绪"
+                            },
+                            {
+                              "type": "Blank",
+                              "bounds": [
+                                233,
+                                1130,
+                                978,
+                                1252
+                              ]
+                            },
+                            {
+                              "type": "Button",
+                              "bounds": [
+                                998,
+                                1130,
+                                1239,
+                                1252
+                              ],
+                              "text": "↓ 最新"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "Column",
+                  "bounds": [
+                    0,
+                    2194,
+                    1320,
+                    2754
+                  ],
+                  "children": [
+                    {
+                      "type": "TextArea",
+                      "bounds": [
+                        54,
+                        2234,
+                        1266,
+                        2532
+                      ],
+                      "id": "message-draft"
+                    },
+                    {
+                      "type": "Row",
+                      "bounds": [
+                        54,
+                        2566,
+                        1266,
+                        2715
+                      ],
+                      "children": [
+                        {
+                          "type": "Button",
+                          "bounds": [
+                            54,
+                            2566,
+                            295,
+                            2715
+                          ],
+                          "id": "pick-images",
+                          "text": "＋ 图片"
+                        },
+                        {
+                          "type": "Button",
+                          "bounds": [
+                            322,
+                            2566,
+                            537,
+                            2715
+                          ],
+                          "id": "toggle-model-controls",
+                          "text": "模型 ▴"
+                        },
+                        {
+                          "type": "Blank",
+                          "bounds": [
+                            564,
+                            2566,
+                            942,
+                            2715
+                          ]
+                        },
+                        {
+                          "type": "Button",
+                          "bounds": [
+                            969,
+                            2566,
+                            1091,
+                            2715
+                          ],
+                          "text": "↓"
+                        },
+                        {
+                          "type": "Button",
+                          "bounds": [
+                            1118,
+                            2566,
+                            1267,
+                            2715
+                          ],
+                          "id": "send-message",
+                          "text": "↑"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

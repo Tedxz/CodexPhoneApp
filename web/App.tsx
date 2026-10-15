@@ -13,6 +13,12 @@ import { applyEvent, describeError, readDraft, storeDraft, SnapshotTracker } fro
 import { Icon, Message, ModelControls, RequestCard } from './components';
 import { ThreadBrowser } from './ThreadBrowser';
 import { updateVisibleThreads } from './thread-browser';
+import {
+  browserIdentityPayload,
+  clientTypeLabel,
+  identifyBrowserSession,
+  readBrowserIdentity,
+} from './device-client';
 
 const pairingFromUrl = new URLSearchParams(location.hash.slice(1)).get('pair') || '';
 if (pairingFromUrl) history.replaceState(null, '', location.pathname + location.search);
@@ -49,6 +55,8 @@ export function App() {
   const [checked, setChecked] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [browserIdentity] = useState(readBrowserIdentity);
+  const [identityNotice, setIdentityNotice] = useState(browserIdentity.notice);
   const [live, setLive] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [nextThreads, setNextThreads] = useState<string | null>(null);
@@ -242,8 +250,11 @@ export function App() {
   useEffect(() => {
     let active = true;
     api<Bootstrap>('/bootstrap')
-      .then((state) => {
-        if (active) setBoot(state);
+      .then((state) => identifyBrowserSession(state, browserIdentity))
+      .then((result) => {
+        if (!active) return;
+        setBoot(result.bootstrap);
+        setIdentityNotice(result.notice);
       })
       .catch((e) => {
         if (active && (!(e instanceof ApiError) || e.status !== 401)) setFailure(e);
@@ -254,7 +265,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [browserIdentity]);
   useEffect(() => {
     if (!boot?.device.id) return;
     let workspaceRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -406,10 +417,19 @@ export function App() {
     try {
       await api('/pair', {
         method: 'POST',
-        body: JSON.stringify({ token: pairToken.trim(), name: deviceName }),
+        body: JSON.stringify({
+          token: pairToken.trim(),
+          name: deviceName,
+          ...browserIdentityPayload(browserIdentity),
+        }),
       });
       setPairToken('');
-      setBoot(await api<Bootstrap>('/bootstrap'));
+      const result = await identifyBrowserSession(
+        await api<Bootstrap>('/bootstrap'),
+        browserIdentity,
+      );
+      setBoot(result.bootstrap);
+      setIdentityNotice(result.notice);
       setNotice('');
     } catch (e) {
       setFailure(e);
@@ -543,14 +563,23 @@ export function App() {
     const revision = authRevision.current;
     setModal('settings');
     try {
+      if (boot && identityNotice && browserIdentity.clientKey) {
+        const identified = await identifyBrowserSession(boot, browserIdentity);
+        if (revision !== authRevision.current) return;
+        setBoot(identified.bootstrap);
+        setIdentityNotice(identified.notice);
+      }
       const result = await api<{ data: Device[] }>('/devices');
       if (revision === authRevision.current) setDevices(result.data);
     } catch (e) {
-      setFailure(e);
+      if (revision !== authRevision.current) return;
+      if (e instanceof ApiError && e.status === 401) clearSession();
+      else setFailure(e);
     }
   }
   async function revoke(device: Device) {
-    if (!confirm(`撤销「${device.name}」的访问权限？`)) return;
+    if (!confirm(`撤销「${device.name}」的所有访问权限？该客户端的所有入口都需要重新配对。`))
+      return;
     try {
       await api(`/devices/${device.id}`, { method: 'DELETE' });
       setDevices((current) => current.filter((x) => x.id !== device.id));
@@ -560,6 +589,11 @@ export function App() {
     }
   }
   async function logout() {
+    if (
+      (boot?.device.authorizationCount || 0) > 1 &&
+      !confirm('退出当前客户端？该客户端的所有入口授权都会失效，需要重新配对。')
+    )
+      return;
     try {
       await api('/logout', { method: 'POST' });
       clearSession();
@@ -607,7 +641,7 @@ export function App() {
           <p>扫描电脑生成的二维码，或输入一次性配对凭据。</p>
           <form onSubmit={pair}>
             <label className="form-field">
-              设备名称
+              客户端名称
               <input
                 value={deviceName}
                 onChange={(e) => setDeviceName(e.target.value)}
@@ -634,6 +668,11 @@ export function App() {
               </p>
             )}
             {notice && <p className="notice">{notice}</p>}
+            {identityNotice && (
+              <p className="notice" role="status">
+                {identityNotice}
+              </p>
+            )}
             <button className="primary" disabled={pairing || !pairToken.trim()}>
               {pairing ? '正在配对…' : '配对并进入'}
               <Icon name="arrow" />
@@ -734,7 +773,7 @@ export function App() {
             </button>
             <button
               className="icon-button"
-              aria-label="连接与设备设置"
+              aria-label="连接与客户端设置"
               onClick={() => void openSettings()}
             >
               <Icon name="settings" />
@@ -961,7 +1000,7 @@ export function App() {
             <div className="modal-head">
               <div>
                 <p className="eyebrow">{modal === 'new' ? 'START SOMETHING' : 'YOUR CONNECTION'}</p>
-                <h2 id="modal-title">{modal === 'new' ? '新建会话' : '连接与设备'}</h2>
+                <h2 id="modal-title">{modal === 'new' ? '新建会话' : '连接与客户端'}</h2>
               </div>
               <button
                 className="icon-button"
@@ -1021,14 +1060,29 @@ export function App() {
                   {boot.connection.message}
                 </div>
                 <p className="notice">{location.origin}</p>
-                <h3>已配对的设备</h3>
+                <h3>已授权客户端</h3>
+                {identityNotice && (
+                  <p className="notice" role="status">
+                    {identityNotice}
+                  </p>
+                )}
                 {devices.map((device) => (
                   <div className="device-row" key={device.id}>
                     <div>
                       <strong>
                         {device.name}
-                        {device.current ? ' · 当前' : ''}
+                        {device.current ? ' · 当前客户端' : ''}
                       </strong>
+                      <small>
+                        {clientTypeLabel(device)}
+                        {(device.authorizationCount || 0) > 1
+                          ? ` · ${device.authorizationCount} 个入口授权`
+                          : ''}
+                      </small>
+                      <small>
+                        最近使用：{device.lastSeenAt ? timeLabel(device.lastSeenAt) : '暂无记录'}
+                      </small>
+                      <small>首次配对：{timeLabel(device.createdAt)}</small>
                       <small>到期：{timeLabel(device.expiresAt)}</small>
                     </div>
                     <button className="secondary" onClick={() => void revoke(device)}>
@@ -1037,10 +1091,16 @@ export function App() {
                   </div>
                 ))}
                 <p className="notice">
-                  要添加另一台设备，请在电脑运行 <code>npm run pair</code>。
+                  同一 App 重复配对会更新原记录。浏览器受存储范围限制，局域网地址与 Funnel
+                  地址分别识别；App 与浏览器也分别显示。
+                  旧版授权无法仅凭名称自动合并，可撤销不再使用的记录。
                 </p>
+                <p className="notice">
+                  要添加客户端，请在电脑运行 <code>npm run pair</code>。
+                </p>
+                <p className="notice">撤销或退出会使该客户端的所有入口授权同时失效。</p>
                 <button className="secondary danger" onClick={() => void logout()}>
-                  退出当前设备
+                  退出当前客户端
                 </button>
               </div>
             )}

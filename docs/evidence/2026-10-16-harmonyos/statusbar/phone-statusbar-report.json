@@ -1,0 +1,133 @@
+{
+  "date": "2026-10-16",
+  "result": "passed",
+  "device": {
+    "name": "Mate 90 Pro Max",
+    "model": "CMM-AL10",
+    "api": 26
+  },
+  "signedHapSha256": "7df148d4048b517515d72cf79e76b3a2ace778fd5d889115ace2ac4fcfd6d0bc",
+  "baseline": {
+    "statusBarBackground": "#FFFFFF",
+    "pageHeaderBackground": "#F6F7F2",
+    "mismatchReproduced": true,
+    "originalScreenshot": "phone-before.png"
+  },
+  "fixed": {
+    "statusBarBackground": "#F6F7F2",
+    "pageHeaderBackground": "#F6F7F2",
+    "systemClockInk": "#243A32",
+    "sameColorAtAllSampledPoints": true
+  },
+  "checks": {
+    "ownConversation": true,
+    "keyboardOpen": {
+      "keyboardRequestedOpen": true,
+      "draftBounds": [
+        54,
+        1268,
+        1266,
+        1566
+      ],
+      "sendBounds": [
+        1118,
+        1600,
+        1267,
+        1749
+      ],
+      "draftTextEmpty": true,
+      "headerVisible": true,
+      "sendVisible": true
+    },
+    "keyboardClosed": {
+      "keyboardRequestedOpen": false,
+      "draftBounds": [
+        54,
+        2234,
+        1266,
+        2532
+      ],
+      "sendBounds": [
+        1118,
+        2566,
+        1267,
+        2715
+      ],
+      "draftTextEmpty": true,
+      "headerVisible": true,
+      "sendVisible": true
+    },
+    "keyboardNoHeaderOverlap": true,
+    "newThreadPageTopBar": true,
+    "settingsPageTopBar": true,
+    "coldStartAutoLogin": true,
+    "coldStartReturnedToSameOwnedThread": true,
+    "deviceAndConnection": {
+      "connected": true,
+      "expectedDeviceNameVisible": true,
+      "currentDeviceBadgeVisible": true
+    }
+  },
+  "finalState": {
+    "paired": true,
+    "ownThreadMarker": "HARMONY_PHONE_REAL_OK",
+    "draftEmpty": true,
+    "keyboardClosed": true,
+    "deviceOperationsStopped": true
+  },
+  "mutations": {
+    "messagesSent": 0,
+    "threadsCreated": 0,
+    "networkSettingsChanged": false,
+    "logout": false
+  },
+  "evidence": {
+    "fullOriginalOwnedConversationScreenshots": [
+      "phone-before.png",
+      "phone-after.png",
+      "phone-final.png"
+    ],
+    "croppedRegions": {
+      "phone-keyboard-after-top.png": {
+        "region": [
+          0,
+          0,
+          1320,
+          400
+        ],
+        "operation": "Exact original screenshot pixel crop only; no color or content modification."
+      },
+      "phone-new-top.png": {
+        "region": [
+          0,
+          0,
+          1320,
+          400
+        ],
+        "operation": "Exact original screenshot pixel crop only; no color or content modification."
+      },
+      "phone-settings-top.png": {
+        "region": [
+          0,
+          0,
+          1320,
+          400
+        ],
+        "operation": "Exact original screenshot pixel crop only; no color or content modification."
+      }
+    },
+    "pixelSamples": "phone-color-samples.json",
+    "keyboardBeforeFixCoordinates": "phone-keyboard-before-fix.json"
+  },
+  "privacy": {
+    "otherUserConversationBodyRead": false,
+    "keyboardPredictionContentReadOrArchived": false,
+    "notificationsOpened": false,
+    "otherDeviceListArchived": false,
+    "galleryRead": false,
+    "rawFullScreenshotsOfKeyboardOrDeviceListRetained": false
+  },
+  "limitations": [
+    "Physical-phone error-banner case was not exercised because its current real pairing was preserved; isolated emulator validation is recorded separately."
+  ]
+}

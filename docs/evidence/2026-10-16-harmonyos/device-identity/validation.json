@@ -1,0 +1,17 @@
+{
+  "checkedAt": "2026-10-15T23:50:45.313996+00:00",
+  "tests": {
+    "passed": 114,
+    "failed": 0,
+    "skipped": 0,
+    "nativeSourceTests": 25
+  },
+  "format": true,
+  "typescript": true,
+  "webBuild": true,
+  "nativeSignedBuild": true,
+  "nativeUnsignedBuild": true,
+  "unsignedSha256": "0a5dfea68467ce7cb7f7515041540544e02034da6b5aa7cdbb11c7229f10ecae",
+  "sourceSigningProfileUnchanged": true,
+  "nativeBuildNote": "SDK warns secure-random system capability is not available on every device; target HarmonyOS 7 phone successfully created and persisted its installation identity."
+}

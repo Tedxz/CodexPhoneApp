@@ -1,0 +1,9 @@
+{
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Codex Phone native entry',
+  main: '',
+  author: '',
+  license: '',
+  dependencies: {},
+}

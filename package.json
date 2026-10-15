@@ -19,7 +19,9 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm test && npm run build"
+    "check": "npm run format:check && npm test && npm run build",
+    "harmony:doctor": "bash scripts/harmony-env.sh",
+    "harmony:build": "bash scripts/harmony-build.sh"
   },
   "dependencies": {
     "qrcode": "^1.5.4",

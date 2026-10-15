@@ -1,0 +1,68 @@
+{
+  "checkedAt": "2026-10-15T22:57:49.794972+00:00",
+  "artifact": {
+    "path": "tmp/harmony-phone/entry/build/default/outputs/default/entry-default-signed.hap",
+    "sha256": "c48132f071eeb930fb9f2e12374c75a1f6918422a9e877969970c0d99e6e14b5",
+    "sizeBytes": 497010,
+    "zipIntegrityPassed": true
+  },
+  "application": {
+    "bundleName": "com.xiezheng.codexphone",
+    "versionName": "1.0.0",
+    "versionCode": 1000000,
+    "debug": true,
+    "compileSdkType": "HarmonyOS",
+    "compileSdkVersion": "26.0.0.105",
+    "apiReleaseType": "Release"
+  },
+  "api": {
+    "minimum": 26,
+    "target": 26,
+    "rawMinimum": 260000026,
+    "rawTarget": 260000026
+  },
+  "signature": {
+    "tool": "DevEco SDK hap-sign-tool.jar",
+    "verifyAppExitCode": 0,
+    "verifyAppSuccessMarker": true,
+    "embeddedCertificateChainPresent": true,
+    "certificateCount": 3,
+    "embeddedProfilePresent": true,
+    "verifyProfileExitCode": 0,
+    "profileVerifiedPassed": true,
+    "profileType": "debug",
+    "profileValidFrom": "2026-10-15T22:43:57+00:00",
+    "profileValidUntil": "2027-10-15T22:43:57+00:00",
+    "profileCurrentlyValid": true,
+    "authorizedDeviceCount": 2,
+    "specificDeviceCoverageChecked": false,
+    "certificateValidity": [
+      {
+        "isCertificateAuthority": true,
+        "notBefore": "Mar 16 03:04:39 2020 GMT",
+        "notAfter": "Mar 16 03:04:39 2049 GMT"
+      },
+      {
+        "isCertificateAuthority": false,
+        "notBefore": "Oct 15 22:43:57 2026 GMT",
+        "notAfter": "Oct 15 22:43:57 2027 GMT"
+      },
+      {
+        "isCertificateAuthority": true,
+        "notBefore": "Jul  9 02:04:24 2020 GMT",
+        "notAfter": "Jul  7 02:04:24 2030 GMT"
+      }
+    ]
+  },
+  "sourceBuildProfile": {
+    "path": "harmony/build-profile.json5",
+    "sha256": "89208366d620fe434a4343154a2bbaa1827a46c10d42804b419fdec7e60982ec",
+    "expectedSha256": "89208366d620fe434a4343154a2bbaa1827a46c10d42804b419fdec7e60982ec",
+    "unchanged": true
+  },
+  "scope": [
+    "Offline artifact and signature verification only.",
+    "No phone commands were executed; specific device coverage still requires installation-owner confirmation.",
+    "No identity, device identifier, team identifier, certificate identifier, key or password included."
+  ]
+}

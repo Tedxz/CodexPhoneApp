@@ -1,0 +1,11 @@
+oh_modules/
+.hvigor/
+.idea/
+**/build/
+local.properties
+*.p7b
+*.cer
+*.p12
+*.jks
+signing/
+build-profile.local.json5

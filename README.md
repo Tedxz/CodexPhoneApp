@@ -1,10 +1,14 @@
 # Codex Phone
 
-从手机浏览器访问电脑上已有的 Codex 会话。第一阶段为移动端网页，React + TypeScript 前端通过本地 Node.js 网关连接同一台电脑的 Codex app-server control socket。后续手机应用可以复用 `/api/v1` HTTP 与 WebSocket 接口。
+从手机浏览器访问电脑上已有的 Codex 会话。第一阶段为移动端网页，React + TypeScript 前端通过本地 Node.js 网关连接同一台电脑的 Codex app-server control socket。HarmonyOS 原生手机应用与网页共用 `/api/v1` HTTP 与 WebSocket 接口。
 
 网页提供会话列表、按工作路径浏览和历史、文字与图片输入、流式回复、工具过程、新建和继续会话、运行中追加指令、停止、审批与交互问题，以及项目、模型、推理强度和 Plan 模式选择。电脑端权限策略继续由 Codex 管理。
 
 **接入前提：电脑正在运行的 Codex 必须提供可连接的共享 control socket，并支持所需协议。** 不同 Codex 版本和客户端可能不共享同一个运行后端；能读取历史不代表能控制另一个进程中的运行任务。本项目不会另起独立 app-server 来替代共享接入。共享会话与真机验收方法见 [验收清单](docs/ACCEPTANCE.md)。
+
+## HarmonyOS 原生应用
+
+HarmonyOS 7 原生客户端位于 [`harmony/`](harmony/README.md)，使用 ArkTS / ArkUI 与同一个网关连接。环境检查运行 `npm run harmony:doctor`，实际 HAP 构建运行 `npm run harmony:build`；构建、模拟器与签名说明见原生目录文档。
 
 ## 按工作路径浏览
 
@@ -31,7 +35,7 @@ npm run pair
 
 默认入口 `http://127.0.0.1:8787` 只能在这台电脑访问。配对凭据有效期 5 分钟，只能使用一次；设备登录有效期 30 天。手机使用前请按下面选择局域网或 Funnel 入口。
 
-本机当前公网入口（2026-10-16）为 [https://xz-macbookair.tail9ddfa1.ts.net](https://xz-macbookair.tail9ddfa1.ts.net)。Funnel 443 已开启，公网 HTTPS 健康检查返回 `200` 且 TLS 验证通过；用户已确认页面打开。局域网入口 [http://192.168.0.118:8787](http://192.168.0.118:8787) 也已恢复，由独立网关进程提供；两进程共用设备数据目录，现有设备记录保留。公网 WSS 完整流程与手机蜂窝网络验收仍待完成。
+本机当前公网入口（2026-10-16）为 [https://xz-macbookair.tail9ddfa1.ts.net](https://xz-macbookair.tail9ddfa1.ts.net)。Funnel 443 已开启，公网 HTTPS 健康检查返回 `200` 且 TLS 验证通过；用户已确认页面打开。局域网入口 [http://192.168.0.118:8787](http://192.168.0.118:8787) 也已恢复，由独立网关进程提供；两进程共用设备数据目录，现有设备记录保留。HarmonyOS 原生客户端已在实体手机完成该域名的 HTTPS 配对、WSS 连接与真实对话；手机蜂窝网络切换仍待验收。
 
 `doctor` 只检查配置、构建产物、Codex 版本和共享 socket 握手/列表查询，不创建或继续任务，不修改系统设置。失败时先处理它给出的具体连接原因。
 
@@ -68,7 +72,7 @@ npm run devices
 npm run revoke -- 设备ID
 ```
 
-设备撤销后，其现有连接会关闭。前台网关按 `Ctrl+C` 停止；手机断开或网关停止不等同于停止正在电脑端运行的 Codex 任务，需要时先在对话中点击停止。
+客户端列表按同一 App 安装或同一浏览器站点实例识别，重复配对复用记录，并显示客户端类型、首次配对和最近使用时间。原生 App 的局域网与 Funnel 授权可归入同一记录；浏览器不同来源分别识别。旧记录会在原客户端访问后迁移，无法确认来源的历史记录标为「旧版授权」，可逐项撤销。撤销或退出一个客户端会使其全部入口授权及现有连接失效。前台网关按 `Ctrl+C` 停止；手机断开或网关停止不等同于停止正在电脑端运行的 Codex 任务，需要时先在对话中点击停止。
 
 可选的 macOS 登录启动配置：
 
@@ -80,7 +84,7 @@ node --import tsx scripts/launch-agent.ts
 
 ## 开发与验证
 
-截至 2026-10-16，61 项自动测试、构建及真实后端诊断通过；另已验证双连接、网页文字/图片与追加/停止、运行中网关重启恢复、显式会话设置、共享 socket 交互式 CLI 接续、文件变更审批和 Funnel 公网 HTTPS。完整网页测试使用本机 Chromium 移动视口；独立 `codex exec resume` 路径、实体手机完整操作与公网 WSS 完整流程仍未通过全部验收，整体保持部分验收。持久证据与剩余项目见 [验收记录](docs/ACCEPTANCE.md)。
+截至 2026-10-16，本分支 114 项自动测试（网页/网关 89 项、原生客户端 25 项）、构建及真实后端诊断通过；另已验证双连接、网页文字/图片与追加/停止、运行中网关重启恢复、显式会话设置、共享 socket 交互式 CLI 接续、文件变更审批和 Funnel 公网 HTTPS。完整网页测试使用本机 Chromium 移动视口；独立 `codex exec resume` 路径、网页在实体手机上的完整操作和蜂窝网络下的公网 WSS 流程仍未通过全部验收，整体保持部分验收。原生手机的安装、配对、真实对话和重启恢复见 [HarmonyOS 验收](docs/HARMONYOS-ACCEPTANCE.md)。持久证据与剩余项目见 [验收记录](docs/ACCEPTANCE.md)。
 
 代码统一使用 Prettier 格式化；提交前运行完整检查，依次验证格式、自动测试和生产构建：
 

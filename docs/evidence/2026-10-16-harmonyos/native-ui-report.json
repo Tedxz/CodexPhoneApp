@@ -1,0 +1,113 @@
+{
+  "platform": "HarmonyOS 7 API 26 phone emulator",
+  "device": "127.0.0.1:5555",
+  "client": "native ArkUI HAP",
+  "scope": "Isolated fixture gateway at private LAN address; no writes to existing real Codex tasks",
+  "checks": [
+    {
+      "name": "Native pairing form, readable mobile layout, no horizontal overflow",
+      "status": "passed",
+      "evidence": "initial-pairing.png"
+    },
+    {
+      "name": "Pair over native HTTP and display 5 workspaces",
+      "status": "passed",
+      "evidence": "fixture-paired.png"
+    },
+    {
+      "name": "Duplicate project basenames distinguished by full working path",
+      "status": "passed",
+      "evidence": "fixture-workspaces.png"
+    },
+    {
+      "name": "Workspace search team-b filters to 1 folder containing 2 threads",
+      "status": "passed",
+      "evidence": "fixture-path-search.png, fixture-folder.png"
+    },
+    {
+      "name": "Directory-scoped thread search 44 returns 1 result",
+      "status": "passed",
+      "evidence": "fixture-thread-search-number.png"
+    },
+    {
+      "name": "Directory pagination increases 40 loaded threads to all 45",
+      "status": "passed",
+      "evidence": "fixture-pagination-end.png, fixture-pagination-loaded.png"
+    },
+    {
+      "name": "All-threads browsing returns first 40 independently of folder selection",
+      "status": "passed",
+      "evidence": "fixture-all-threads.png"
+    },
+    {
+      "name": "Force-stop and relaunch restores saved authenticated login",
+      "status": "passed",
+      "evidence": "fixture-relaunch.png"
+    },
+    {
+      "name": "Native connection settings and paired device list identify current device",
+      "status": "passed",
+      "evidence": "fixture-settings.png"
+    },
+    {
+      "name": "Native WebSocket connects with strict LAN origin and subscribes to shared thread snapshots",
+      "status": "passed",
+      "evidence": "fixture-live-ready.png, fixture-conversation.png"
+    },
+    {
+      "name": "Native composer sends text and receives HARMONY_NATIVE_OK as streamed updates",
+      "status": "passed",
+      "evidence": "fixture-streaming.png, fixture-stream-completed.png, fixture-actions.json"
+    },
+    {
+      "name": "Active turn accepts steer and then stops with interrupted outcome",
+      "status": "passed",
+      "evidence": "fixture-hold-latest.png, fixture-steered.png, fixture-stopped.png, fixture-actions.json"
+    },
+    {
+      "name": "Native command approval sends accept and resolves pending request",
+      "status": "passed",
+      "evidence": "fixture-approval.png, fixture-approved.png, fixture-actions.json"
+    },
+    {
+      "name": "Native question options send choice=原生方案 and resolve pending request",
+      "status": "passed",
+      "evidence": "fixture-question.png, fixture-question-selected.png, fixture-question-answered.png, fixture-actions.json"
+    },
+    {
+      "name": "Native model/effort/Plan selection and project-based new thread creation",
+      "status": "passed",
+      "evidence": "fixture-model-controls.png, fixture-mode-picker.png, fixture-effort-picker.png, fixture-plan-response.png, fixture-created-thread.png"
+    },
+    {
+      "name": "Unsent draft is isolated and restored when navigating back to original thread",
+      "status": "passed",
+      "evidence": "fixture-draft-restored.png"
+    },
+    {
+      "name": "Fixed icon padding renders complete plus/send/refresh symbols",
+      "status": "passed",
+      "evidence": "fixture-final-icons.png"
+    },
+    {
+      "name": "Streamed content follows latest, user scroll preserves reading position, down button resumes latest",
+      "status": "passed",
+      "evidence": "fixture-auto-follow-one.png, fixture-reading-history.png, fixture-jump-latest.png"
+    },
+    {
+      "name": "Native tool card expands and preserves expansion across streamed updates",
+      "status": "passed",
+      "evidence": "fixture-tool-expanded.png, fixture-auto-follow-one.png"
+    },
+    {
+      "name": "Native system photo picker selects screenshot, uploads 1 image, and authenticated history renders it",
+      "status": "passed",
+      "evidence": "fixture-photo-picker.png, fixture-image-attached.png, fixture-image-sent.png, fixture-actions.json"
+    },
+    {
+      "name": "Session settings reach gateway with fixture-model, high effort and plan mode",
+      "status": "passed",
+      "evidence": "fixture-actions.json native-settings-wire"
+    }
+  ]
+}

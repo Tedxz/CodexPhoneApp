@@ -17,11 +17,21 @@ if (command === 'pair') {
   console.log(`手动配对凭据: ${pairing.token}`);
 } else if (command === 'devices') {
   console.table(
-    auth
-      .list()
-      .map((x) => ({ id: x.id, name: x.name, expires: new Date(x.expiresAt).toLocaleString() })),
+    auth.list().map((x) => ({
+      id: x.id,
+      name: x.name,
+      type:
+        x.clientType === 'harmony'
+          ? 'HarmonyOS App'
+          : x.clientType === 'browser'
+            ? '浏览器'
+            : '旧版授权',
+      authorizations: x.authorizationCount ?? 1,
+      lastUsed: x.lastSeenAt ? new Date(x.lastSeenAt).toLocaleString() : '未知',
+      expires: new Date(x.expiresAt).toLocaleString(),
+    })),
   );
 } else if (command === 'revoke') {
   if (!args[0]) throw new Error('用法: npm run revoke -- <设备 ID>');
-  console.log(auth.revoke(args[0]) ? '设备已撤销，现有连接将关闭。' : '设备不存在。');
+  console.log(auth.revoke(args[0]) ? '客户端全部入口授权已撤销，现有连接将关闭。' : '设备不存在。');
 } else throw new Error('支持的命令: pair、devices、revoke');

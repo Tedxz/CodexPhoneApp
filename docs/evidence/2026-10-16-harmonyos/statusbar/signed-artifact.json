@@ -1,0 +1,55 @@
+{
+  "checkedAt": "2026-10-15T23:18:43.930718+00:00",
+  "artifact": {
+    "path": "tmp/harmony-phone/entry/build/default/outputs/default/entry-default-signed.hap",
+    "sha256": "7df148d4048b517515d72cf79e76b3a2ace778fd5d889115ace2ac4fcfd6d0bc",
+    "sizeBytes": 503573,
+    "zipIntegrityPassed": true
+  },
+  "application": {
+    "bundleName": "com.xiezheng.codexphone",
+    "versionName": "1.0.0",
+    "versionCode": 1000000,
+    "debug": true,
+    "compileSdkType": "HarmonyOS",
+    "compileSdkVersion": "26.0.0.105",
+    "apiReleaseType": "Release"
+  },
+  "api": {
+    "minimum": 26,
+    "target": 26,
+    "rawMinimum": 260000026,
+    "rawTarget": 260000026
+  },
+  "signature": {
+    "tool": "DevEco SDK hap-sign-tool.jar",
+    "verifyAppExitCode": 0,
+    "verifyAppPassed": true,
+    "embeddedCertificateChainPresent": true,
+    "embeddedProfilePresent": true,
+    "verifyProfileExitCode": 0,
+    "profileVerifiedPassed": true,
+    "standaloneProfileVerificationReused": true,
+    "standaloneProfileVerificationAt": "2026-10-15T23:14:45.233422+00:00",
+    "standaloneProfileVerificationNote": "Profile unchanged for the keyboard-resize rebuild; prior standalone verify-profile result retained. Current HAP signature was revalidated by official verify-app."
+  },
+  "sourceBuildProfile": {
+    "path": "harmony/build-profile.json5",
+    "sha256": "89208366d620fe434a4343154a2bbaa1827a46c10d42804b419fdec7e60982ec",
+    "expectedSha256": "89208366d620fe434a4343154a2bbaa1827a46c10d42804b419fdec7e60982ec",
+    "unchanged": true
+  },
+  "scope": [
+    "Offline artifact verification only; no device operation or build performed.",
+    "Raw certificate and profile extraction files were removed after verification.",
+    "Report excludes identity, device and team identifiers, certificate identifiers, keys and passwords."
+  ],
+  "keyboardApiReview": {
+    "method": "UIContext.setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE)",
+    "deviceMetadataSupportsPhone": true,
+    "deviceMetadataSupportsTablet": true,
+    "minimumHarmonyApi": 12,
+    "reviewedAgainstSdk": "26.0.0.105",
+    "runtimeLayoutNotTestedByThisReport": true
+  }
+}

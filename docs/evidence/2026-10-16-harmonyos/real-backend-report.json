@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-15T17:52:43.779Z",
+  "transport": "native client via LAN gateway; independent read-only event observer",
+  "threadId": "01a140ad-ef23-77c2-ab36-384511b50c26",
+  "deltas": 6,
+  "active": true,
+  "idle": true,
+  "marker": true,
+  "tools": 0,
+  "observerDeviceRevoked": true
+}

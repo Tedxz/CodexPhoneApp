@@ -1,0 +1,46 @@
+{
+  "platform": "HarmonyOS 7 API 26 emulator, native ArkUI HAP",
+  "lan": {
+    "authenticated": true,
+    "deviceName": "HarmonyOS-native-QA-LAN",
+    "workspaceCount": 33,
+    "webSocketConnected": true,
+    "ownedThreadId": "01a140ad-ef23-77c2-ab36-384511b50c26",
+    "newThreadCreated": true,
+    "messageSentExactlyOnce": true,
+    "response": "HARMONY_NATIVE_REAL_OK",
+    "finalStatus": "idle",
+    "existingUserThreadsWritten": false,
+    "evidence": "real-lan-success.png, real-backend-report.json",
+    "observedIssue": "A successful first send encountered a transient empty-rollout snapshot read while the backend was materializing history. Streaming completed correctly. Root added bounded history-only retry with unit coverage; no duplicate real turn.send was issued."
+  },
+  "funnelDomain": {
+    "url": "https://xz-macbookair.tail9ddfa1.ts.net",
+    "deviceName": "HarmonyOS-native-QA-Funnel",
+    "nativeHttpsPairing": true,
+    "nativeWssConnected": true,
+    "sameOwnedThreadSubscribed": true,
+    "sameResponseRead": "HARMONY_NATIVE_REAL_OK",
+    "additionalThreadsCreated": 0,
+    "messagesSent": 0,
+    "tlsVerification": "Platform default certificate verification; no insecure bypass configured",
+    "routeClaim": "Domain HTTPS/WSS access from emulator verified. A physical cellular or independent public-network route was not tested.",
+    "evidence": "final-funnel-thread-settled.png"
+  },
+  "pendingFinalVerification": [],
+  "finalVerification": {
+    "overinstallPreservedFunnelLogin": true,
+    "nativeWssConnectedAfterRestart": true,
+    "sameOwnedThreadReadAfterRestart": true,
+    "lateSnapshotTitleAndPathRefresh": true,
+    "finalResponse": "HARMONY_NATIVE_REAL_OK",
+    "logoutReturnedToPairingPage": true,
+    "credentialFieldEmptyAfterLogout": true,
+    "newRealThreadsCreatedTotal": 1,
+    "realPromptsSentTotal": 1,
+    "existingUserThreadsWritten": false,
+    "evidence": "final-funnel-thread-settled.png, final-logged-out.png",
+    "nonBlockingObservation": "Intentional logout shows both signed-out and expired-session notices because revocation closes the active WebSocket. Authentication is cleared correctly.",
+    "followupFix": "Final source closes the native WebSocket before intentional logout so the expected server revocation does not race an expired-session banner. This cosmetic followup was compiled; the successful logout itself was verified before this change."
+  }
+}

@@ -1,0 +1,271 @@
+[
+  {
+    "bounds": [
+      0,
+      0,
+      1320,
+      2232
+    ],
+    "children": [
+      {
+        "type": "root",
+        "bounds": [
+          0,
+          117,
+          1320,
+          2232
+        ],
+        "children": [
+          {
+            "type": "Column",
+            "bounds": [
+              0,
+              117,
+              1320,
+              2148
+            ],
+            "children": [
+              {
+                "type": "Row",
+                "bounds": [
+                  0,
+                  117,
+                  1320,
+                  261
+                ],
+                "children": [
+                  {
+                    "type": "Text",
+                    "text": "请输入完整的 HTTPS 地址或局域网 HTTP 地址，不要包含账号、路径或查询参数。",
+                    "bounds": [
+                      48,
+                      129,
+                      1152,
+                      249
+                    ],
+                    "children": []
+                  },
+                  {
+                    "type": "Button",
+                    "text": "×",
+                    "bounds": [
+                      1182,
+                      129,
+                      1302,
+                      249
+                    ],
+                    "clickable": true,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "type": "Scroll",
+                "bounds": [
+                  0,
+                  261,
+                  1320,
+                  2148
+                ],
+                "scrollable": true,
+                "children": [
+                  {
+                    "type": "Column",
+                    "bounds": [
+                      0,
+                      261,
+                      1320,
+                      2148
+                    ],
+                    "children": [
+                      {
+                        "type": "Column",
+                        "bounds": [
+                          72,
+                          307,
+                          1248,
+                          751
+                        ],
+                        "children": [
+                          {
+                            "type": "Text",
+                            "text": "想法继续，\n不必守在电脑前。",
+                            "bounds": [
+                              72,
+                              307,
+                              1248,
+                              565
+                            ],
+                            "children": []
+                          },
+                          {
+                            "type": "Text",
+                            "text": "在手机上接续你的 Codex 会话。\n任务留在电脑，进展随时可见。",
+                            "bounds": [
+                              72,
+                              601,
+                              1248,
+                              751
+                            ],
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "type": "Column",
+                        "bounds": [
+                          72,
+                          823,
+                          1248,
+                          2148
+                        ],
+                        "children": [
+                          {
+                            "type": "Text",
+                            "text": "连接你的电脑",
+                            "bounds": [
+                              138,
+                              889,
+                              534,
+                              966
+                            ],
+                            "children": []
+                          },
+                          {
+                            "type": "Text",
+                            "text": "电脑地址",
+                            "bounds": [
+                              138,
+                              1008,
+                              1182,
+                              1050
+                            ],
+                            "children": []
+                          },
+                          {
+                            "id": "pair-endpoint",
+                            "type": "TextInput",
+                            "text": "ftp://127.0.0.1",
+                            "bounds": [
+                              138,
+                              1092,
+                              1182,
+                              1242
+                            ],
+                            "clickable": true,
+                            "longClickable": true,
+                            "scrollable": true,
+                            "children": []
+                          },
+                          {
+                            "type": "Text",
+                            "text": "设备名称",
+                            "bounds": [
+                              138,
+                              1284,
+                              1182,
+                              1326
+                            ],
+                            "children": []
+                          },
+                          {
+                            "id": "pair-device-name",
+                            "type": "TextInput",
+                            "text": "Statusbar-QA",
+                            "bounds": [
+                              138,
+                              1368,
+                              1182,
+                              1518
+                            ],
+                            "clickable": true,
+                            "longClickable": true,
+                            "scrollable": true,
+                            "children": []
+                          },
+                          {
+                            "type": "Text",
+                            "text": "一次性配对凭据",
+                            "bounds": [
+                              138,
+                              1560,
+                              1182,
+                              1602
+                            ],
+                            "children": []
+                          },
+                          {
+                            "id": "pair-credential",
+                            "type": "TextInput",
+                            "text": "**************************",
+                            "bounds": [
+                              138,
+                              1644,
+                              1182,
+                              1794
+                            ],
+                            "clickable": true,
+                            "longClickable": true,
+                            "scrollable": true,
+                            "children": [
+                              {
+                                "type": "Stack",
+                                "bounds": [
+                                  1092,
+                                  1689,
+                                  1182,
+                                  1749
+                                ],
+                                "clickable": true,
+                                "children": [
+                                  {
+                                    "type": "SymbolGlyph",
+                                    "bounds": [
+                                      1092,
+                                      1689,
+                                      1152,
+                                      1749
+                                    ],
+                                    "children": []
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "id": "pair-submit",
+                            "type": "Button",
+                            "text": "配对并进入  ↗",
+                            "bounds": [
+                              138,
+                              1836,
+                              1182,
+                              1992
+                            ],
+                            "clickable": true,
+                            "children": []
+                          },
+                          {
+                            "type": "Text",
+                            "text": "支持局域网地址或 Tailscale Funnel。\n在电脑项目目录运行 npm run pair 获取凭据。",
+                            "bounds": [
+                              138,
+                              2034,
+                              1182,
+                              2148
+                            ],
+                            "children": []
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

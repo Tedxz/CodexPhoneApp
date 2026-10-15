@@ -1,0 +1,8 @@
+{
+  modelVersion: '26.0.0',
+  name: 'codex-phone-harmony',
+  version: '1.0.0',
+  description: 'Codex 随行 HarmonyOS 原生客户端',
+  dependencies: {},
+  devDependencies: {},
+}

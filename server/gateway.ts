@@ -5,11 +5,12 @@ import { resolve, extname, sep } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Config } from './config.js';
-import { AuthStore, PairingLimiter, sessionToken, sessionCookie } from './auth.js';
+import { AuthError, AuthStore, PairingLimiter, sessionToken, sessionCookie } from './auth.js';
 import { UploadStore, MAX_IMAGE_BYTES } from './uploads.js';
 import type { CodexAdapter } from './codex.js';
 import type {
   ConversationItem,
+  ClientType,
   Device,
   GatewayEvent,
   RequestAnswer,
@@ -87,7 +88,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
       throw new HttpError(403, '请求来源不受信任', 'ORIGIN_DENIED');
   }
   function deviceFor(req: IncomingMessage) {
-    const device = auth.authenticate(sessionToken(req.headers.cookie));
+    const device = auth.touch(sessionToken(req.headers.cookie));
     if (!device) throw new HttpError(401, '请先配对设备', 'UNAUTHORIZED');
     return device;
   }
@@ -148,14 +149,34 @@ export function createGateway(config: Config, codex: CodexAdapter) {
         const result = auth.pair(
           text(input.token, '配对凭据', 100),
           typeof input.name === 'string' ? input.name : '我的手机',
+          {
+            clientKey: input.clientKey as string | undefined,
+            clientType: input.clientType as ClientType | undefined,
+            sessionToken: sessionToken(req.headers.cookie),
+            origin: req.headers.origin,
+          },
         );
         if (!result)
           throw new HttpError(401, '配对凭据无效或已过期，请在电脑重新生成', 'PAIRING_EXPIRED');
+        revokeSockets();
         res.setHeader('Set-Cookie', sessionCookie(result.token, secure));
         return json(res, 200, { device: result.device });
       }
       if (path.startsWith('/api/')) {
         const device = deviceFor(req);
+        if (path === '/api/v1/devices/current/identify' && method === 'POST') {
+          if (!req.headers['content-type']?.startsWith('application/json'))
+            throw new HttpError(415, '需要 JSON 请求');
+          const input = object(JSON.parse((await body(req, 2048)).toString()));
+          const identified = auth.identify(
+            sessionToken(req.headers.cookie),
+            input.clientKey as string,
+            input.clientType as ClientType,
+            req.headers.origin,
+          );
+          if (!identified) throw new HttpError(401, '请先配对客户端', 'UNAUTHORIZED');
+          return json(res, 200, { device: identified });
+        }
         if (path === '/api/v1/bootstrap' && method === 'GET')
           return json(res, 200, {
             device,
@@ -164,7 +185,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
             capabilities: codex.capabilities,
           });
         if (path === '/api/v1/logout' && method === 'POST') {
-          auth.revoke(device.id);
+          auth.revokeSession(sessionToken(req.headers.cookie));
           revokeSockets();
           res.setHeader('Set-Cookie', sessionCookie('', secure, true));
           return json(res, 200, { ok: true });
@@ -255,7 +276,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
       }
       const e = error as Error & { code?: string };
       const status =
-        error instanceof HttpError
+        error instanceof HttpError || error instanceof AuthError
           ? error.status
           : error instanceof SyntaxError || error instanceof URIError
             ? 400
@@ -297,6 +318,13 @@ export function createGateway(config: Config, codex: CodexAdapter) {
         ws.on('close', () => clients.delete(ws));
         ws.on('pong', () => {
           client.alive = true;
+          try {
+            const current = auth.touch(client.token);
+            if (current) client.device = current;
+            else ws.close(4001, 'Client revoked or expired');
+          } catch {
+            ws.close(1013, 'Authorization store busy; reconnect');
+          }
         });
         send(ws, {
           type: 'event',
@@ -307,16 +335,18 @@ export function createGateway(config: Config, codex: CodexAdapter) {
         ws.on('message', async (data) => {
           let id = '';
           try {
-            if (!auth.authenticate(token)) {
+            const current = auth.touch(token);
+            if (!current) {
               ws.close(4001);
               return;
             }
+            client.device = current;
             const request = object(JSON.parse(data.toString()));
             id = text(request.id, '请求 ID', 100);
             if (client.busy >= 8) throw new HttpError(429, '操作过于频繁');
             const method = text(request.method, '方法', 50);
             const params = object(request.params);
-            const cacheKey = device.id + ':' + id;
+            const cacheKey = current.id + ':' + id;
             const digest = createHash('sha256')
               .update(JSON.stringify({ method, params }))
               .digest('hex');
