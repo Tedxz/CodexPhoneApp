@@ -6,17 +6,13 @@ import type {
   SessionSettings,
   ThreadSnapshot,
   ThreadSummary,
+  WorkspaceSummary,
 } from '../shared/protocol';
 import { api, ApiError, LiveClient } from './api';
-import {
-  applyEvent,
-  describeError,
-  readDraft,
-  storeDraft,
-  updateThreadList,
-  SnapshotTracker,
-} from './state';
+import { applyEvent, describeError, readDraft, storeDraft, SnapshotTracker } from './state';
 import { Icon, Message, ModelControls, RequestCard } from './components';
+import { ThreadBrowser } from './ThreadBrowser';
+import { updateVisibleThreads } from './thread-browser';
 
 const pairingFromUrl = new URLSearchParams(location.hash.slice(1)).get('pair') || '';
 if (pairingFromUrl) history.replaceState(null, '', location.pathname + location.search);
@@ -25,6 +21,12 @@ interface Attachment {
   url: string;
   name: string;
 }
+interface BrowserQuery {
+  mode: 'all' | 'workspaces';
+  workspace: string | null;
+  search: string;
+}
+const initialBrowserQuery: BrowserQuery = { mode: 'all', workspace: null, search: '' };
 const timeLabel = (time: number) =>
   time
     ? new Intl.DateTimeFormat('zh-CN', {
@@ -50,7 +52,10 @@ export function App() {
   const [live, setLive] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [nextThreads, setNextThreads] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
+  const [browserQuery, setBrowserQuery] = useState<BrowserQuery>(initialBrowserQuery);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [listBusy, setListBusy] = useState(false);
+  const [listError, setListError] = useState('');
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const [mobileChat, setMobileChat] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -90,8 +95,7 @@ export function App() {
   const client = useRef<LiveClient | null>(null);
   const selected = useRef<string | null>(null);
   const tracker = useRef(new SnapshotTracker());
-  const searchRef = useRef(search);
-  searchRef.current = search;
+  const browserQueryRef = useRef(browserQuery);
   const loadListVersion = useRef(0);
   const timeline = useRef<HTMLDivElement>(null);
   const nearBottom = useRef(true);
@@ -108,6 +112,12 @@ export function App() {
     setBoot(null);
     setLive(false);
     setThreads([]);
+    setNextThreads(null);
+    setWorkspaces([]);
+    browserQueryRef.current = initialBrowserQuery;
+    setBrowserQuery(initialBrowserQuery);
+    setListBusy(false);
+    setListError('');
     setAttachments([]);
     attachmentDrafts.current.clear();
     setDraft('');
@@ -128,19 +138,67 @@ export function App() {
     if (selected.current !== id) return;
     commitSnapshot((current) => tracker.current.reconcile(current, incoming));
   }, [commitSnapshot]);
-  const loadThreads = useCallback(async (cursor?: string) => {
-    const version = ++loadListVersion.current;
-    const result = await api<{ data: ThreadSummary[]; nextCursor: string | null }>(
-      `/threads?search=${encodeURIComponent(searchRef.current)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
-    );
-    if (version !== loadListVersion.current) return;
-    setThreads((previous) =>
-      cursor
-        ? [...previous, ...result.data.filter((x) => !previous.some((y) => y.id === x.id))]
-        : result.data,
-    );
-    setNextThreads(result.nextCursor);
-  }, []);
+  const loadThreads = useCallback(
+    async (cursor?: string) => {
+      const version = ++loadListVersion.current;
+      const query = browserQueryRef.current;
+      setListBusy(true);
+      setListError('');
+      try {
+        if (query.mode === 'workspaces' && query.workspace === null) {
+          const result = await api<{ data: WorkspaceSummary[] }>('/workspaces');
+          if (version === loadListVersion.current) setWorkspaces(result.data);
+        } else {
+          const params = new URLSearchParams({ search: query.search.trim().slice(0, 200) });
+          if (query.mode === 'workspaces' && query.workspace !== null)
+            params.set('cwd', query.workspace);
+          if (cursor) params.set('cursor', cursor);
+          const result = await api<{ data: ThreadSummary[]; nextCursor: string | null }>(
+            `/threads?${params}`,
+          );
+          if (version !== loadListVersion.current) return;
+          setThreads((previous) =>
+            cursor
+              ? [...previous, ...result.data.filter((x) => !previous.some((y) => y.id === x.id))]
+              : result.data,
+          );
+          setNextThreads(result.nextCursor);
+        }
+      } catch (e) {
+        if (version !== loadListVersion.current) return;
+        if (e instanceof ApiError && e.status === 401) clearSession();
+        else setListError(describeError(e));
+      } finally {
+        if (version === loadListVersion.current) setListBusy(false);
+      }
+    },
+    [clearSession],
+  );
+  const changeBrowser = (next: BrowserQuery) => {
+    const previous = browserQueryRef.current;
+    if (
+      previous.mode === next.mode &&
+      previous.workspace === next.workspace &&
+      previous.search === next.search
+    )
+      return;
+    browserQueryRef.current = next;
+    setBrowserQuery(next);
+    // Folder search is local; all other changes invalidate old responses now,
+    // before the debounce timer can start the next request.
+    if (
+      previous.mode === next.mode &&
+      next.mode === 'workspaces' &&
+      previous.workspace === null &&
+      next.workspace === null
+    )
+      return;
+    loadListVersion.current++;
+    setThreads([]);
+    setNextThreads(null);
+    setListError('');
+    setListBusy(!!boot?.connection.connected);
+  };
   const refresh = useCallback(
     function runRefresh(): Promise<void> {
       if (refreshTask.current) {
@@ -199,6 +257,7 @@ export function App() {
   }, []);
   useEffect(() => {
     if (!boot?.device.id) return;
+    let workspaceRefresh: ReturnType<typeof setTimeout> | undefined;
     tracker.current.reset();
     const connection = new LiveClient({
       status: (connected) => setLive(connected),
@@ -217,8 +276,19 @@ export function App() {
         const event = envelope.event;
         if (event.type === 'connection')
           setBoot((current) => (current ? { ...current, connection: event.connection } : current));
-        if (event.type === 'thread.changed')
-          setThreads((current) => updateThreadList(current, event.thread));
+        if (event.type === 'thread.changed') {
+          setThreads((current) =>
+            updateVisibleThreads(current, event.thread, browserQueryRef.current),
+          );
+          const query = browserQueryRef.current;
+          if (query.mode === 'workspaces' && query.workspace === null && !workspaceRefresh) {
+            workspaceRefresh = setTimeout(() => {
+              workspaceRefresh = undefined;
+              const latest = browserQueryRef.current;
+              if (latest.mode === 'workspaces' && latest.workspace === null) void loadThreads();
+            }, 1500);
+          }
+        }
         if (event.type === 'resync') {
           void refresh().catch(setFailure);
           return;
@@ -237,18 +307,33 @@ export function App() {
     };
     document.addEventListener('visibilitychange', visible);
     return () => {
+      clearTimeout(workspaceRefresh);
       connection.close();
       if (client.current === connection) client.current = null;
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [boot?.device.id, refresh, commitSnapshot, clearSession]);
+  }, [boot?.device.id, refresh, commitSnapshot, clearSession, loadThreads]);
+  const threadSearch =
+    browserQuery.mode === 'workspaces' && browserQuery.workspace === null
+      ? ''
+      : browserQuery.search;
   useEffect(() => {
-    if (!boot?.connection.connected) return;
+    if (!boot?.connection.connected) {
+      loadListVersion.current++;
+      setListBusy(false);
+      return;
+    }
     const timer = setTimeout(() => {
       void loadThreads().catch(setFailure);
     }, 250);
     return () => clearTimeout(timer);
-  }, [search, boot?.connection.connected, loadThreads]);
+  }, [
+    threadSearch,
+    browserQuery.mode,
+    browserQuery.workspace,
+    boot?.connection.connected,
+    loadThreads,
+  ]);
   useEffect(() => {
     setSettings(snapshot?.settings || {});
   }, [
@@ -349,7 +434,13 @@ export function App() {
       commitSnapshot(tracker.current.reconcile(null, incoming));
       setDraft('');
       setAttachments([]);
-      setThreads((current) => updateThreadList(current, incoming.thread));
+      const query = browserQueryRef.current;
+      if (query.mode === 'workspaces')
+        changeBrowser({ mode: 'workspaces', workspace: incoming.thread.cwd, search: '' });
+      else if (query.search) changeBrowser({ ...query, search: '' });
+      setThreads((current) =>
+        updateVisibleThreads(current, incoming.thread, browserQueryRef.current),
+      );
       setModal(null);
       setMobileChat(true);
       nearBottom.current = true;
@@ -568,63 +659,40 @@ export function App() {
             className="new-thread"
             disabled={!ready}
             onClick={() => {
-              setNewProject(boot.projects[0]?.id || '');
+              setNewProject(
+                boot.projects.find((project) => project.path === browserQuery.workspace)?.id ||
+                  boot.projects[0]?.id ||
+                  '',
+              );
               setNewSettings({});
               setModal('new');
             }}
           >
             <Icon name="plus" /> 新建会话
           </button>
-          <label className="search">
-            <span className="sr-only">搜索会话</span>
-            <input
-              type="search"
-              placeholder="搜索你的会话"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </label>
-          <div className="eyebrow">
-            你的会话 <span>{threads.length}</span>
-          </div>
         </div>
-        <nav className="thread-list" aria-label="会话列表">
-          {threads.map((thread) => (
-            <button
-              className={`thread-button ${selected.current === thread.id ? 'selected' : ''}`}
-              key={thread.id}
-              onClick={() => void chooseThread(thread.id)}
-            >
-              <span className="thread-title">
-                {thread.status === 'active' && <span className="connection-dot" />}
-                {thread.title}
-              </span>
-              <span className="thread-preview">
-                {thread.preview || thread.cwd.split('/').pop()}
-              </span>
-              <span className="thread-meta">
-                {thread.cwd.split('/').pop()} · {timeLabel(thread.updatedAt)}
-              </span>
-            </button>
-          ))}
-          {!threads.length && (
-            <p className="sidebar-empty">
-              {!boot.connection.connected
-                ? '连接电脑后，你的会话会出现在这里。'
-                : search
-                  ? '没有匹配的会话'
-                  : '还没有会话，从一个新想法开始。'}
-            </p>
-          )}
-          {nextThreads && (
-            <button
-              className="secondary"
-              onClick={() => void loadThreads(nextThreads).catch(setFailure)}
-            >
-              加载更多会话
-            </button>
-          )}
-        </nav>
+        <ThreadBrowser
+          mode={browserQuery.mode}
+          workspace={browserQuery.workspace}
+          workspaces={workspaces}
+          threads={threads}
+          search={browserQuery.search}
+          loading={listBusy}
+          error={listError}
+          nextCursor={nextThreads}
+          selectedId={selected.current}
+          connected={boot.connection.connected}
+          onModeChange={(mode) => changeBrowser({ mode, workspace: null, search: '' })}
+          onWorkspaceChange={(workspace) =>
+            changeBrowser({ mode: 'workspaces', workspace, search: '' })
+          }
+          onSearchChange={(search) => changeBrowser({ ...browserQueryRef.current, search })}
+          onChooseThread={(id) => void chooseThread(id)}
+          onLoadMore={() => {
+            if (nextThreads && !listBusy) void loadThreads(nextThreads);
+          }}
+          onRetry={() => void loadThreads()}
+        />
         <footer className="sidebar-foot">
           <button onClick={() => void openSettings()}>
             <span className={`connection-dot ${ready ? '' : 'offline'}`} />

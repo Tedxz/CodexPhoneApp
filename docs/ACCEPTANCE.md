@@ -6,12 +6,23 @@
 
 ## 自动化与只读诊断
 
-- [x] 最终 `npm test` 通过：51 项测试通过，0 项失败、0 项跳过，包含协议兼容、历史/实时事件竞态和重连后工具终态回归（2026-10-16，Asia/Shanghai）。
+- [x] 最终 `npm test` 通过：61 项测试通过，0 项失败、0 项跳过，包含协议兼容、历史/实时事件竞态和重连后工具终态回归（2026-10-16，Asia/Shanghai）。
 - [x] 最终 `npm run build` 通过：TypeScript 严格检查及 Vite 构建成功，已生成 `dist`（2026-10-16）。
 - [x] 最终 `npm run doctor` 的 WebSocket Upgrade、initialize、`thread/loaded/list`、`thread/list` 均在真实共享后端成功，加载列表返回 5 个会话（2026-10-16）。
 - [ ] 记录 Node、Codex、macOS 和手机浏览器版本。
 
 最终回归环境（2026-10-16）：Node.js `v22.23.1`，Codex CLI `0.162.1`，macOS `26.6.2 (25G83)`；手机浏览器版本待记录。在 Full access 环境重跑 `doctor` 后，配置、构建、项目目录、版本、共享 WebSocket 握手与两个列表探测全部通过。早期受限沙箱的 `EPERM` 记录不能代表当前连接结果。LaunchAgent 生成的 plist 通过 `plutil -lint`，未安装或加载服务。
+
+## 按工作路径浏览（2026-10-16）
+
+完整 `npm run check` 通过：格式检查、61 项自动测试、TypeScript 与生产构建。新增测试覆盖完整分页汇总、同名目录、精确路径、未知路径、分页游标、鉴权和实时筛选。
+
+- [真实后端只读检查](evidence/2026-10-16-workspaces/real-backend.json)：33 个工作路径、59 个会话，其中 9 个路径不在最近 40 条会话内；实际项目筛选、无匹配路径和空路径均正确。Codex 原生空路径查询会解析到主目录，网关已改为完整扫描后精确筛选，避免混入主目录会话。
+- [真实网页检查](evidence/2026-10-16-workspaces/real-browser.json)：在独立临时网关和临时设备中连接既有共享后端，查看全部目录、筛选当前项目、打开真实会话；手机尺寸返回保留路径，390 × 844 与桌面布局没有横向溢出，浏览器无异常。本次未新建或发送真实 Codex 任务。
+- [固定数据网页回归](evidence/2026-10-16-workspaces/browser-fixture.json)：50 个模拟会话、5 个路径，11 组场景通过，包含 45 条同目录会话的分页、同名目录和相邻前缀隔离、搜索、迟到响应、实时事件、空路径、失败重试、断线恢复及移动端返回。截图：[路径列表](evidence/2026-10-16-workspaces/mobile-workspaces.png)、[目录内会话](evidence/2026-10-16-workspaces/mobile-folder.png)。截图使用固定测试数据。
+- [运行入口检查](evidence/2026-10-16-workspaces/deployment.json)：更新并重启现有两台网关后，回环、局域网和公网 Funnel 的已认证路径接口均返回 33 个目录；公网提供最新构建，TLS 验证通过，原有设备记录保留。公网请求使用已记录的 SOCKS/公网地址方式，不代替手机蜂窝网络或完整 WSS 验收。
+
+这些检查使用电脑上的 Chromium 移动视口与桌面视口，不代表实体手机完整操作已通过。
 
 ## 当前网络入口与公网验证
 

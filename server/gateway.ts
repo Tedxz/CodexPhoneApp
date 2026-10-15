@@ -179,6 +179,8 @@ export function createGateway(config: Config, codex: CodexAdapter) {
           revokeSockets();
           return json(res, 200, { ok: true });
         }
+        if (path === '/api/v1/workspaces' && method === 'GET')
+          return json(res, 200, { data: await codex.listWorkspaces() });
         if (path === '/api/v1/threads' && method === 'GET')
           return json(
             res,
@@ -186,6 +188,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
             await codex.listThreads({
               cursor: url.searchParams.get('cursor') || undefined,
               search: url.searchParams.get('search')?.slice(0, 200) || undefined,
+              cwd: url.searchParams.get('cwd') ?? undefined,
             }),
           );
         const threadMatch = /^\/api\/v1\/threads\/([^/]+)$/.exec(path);

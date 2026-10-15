@@ -8,19 +8,22 @@
 
 一次性配对凭据由电脑 CLI 生成，二维码 URL 将它放在 `#pair=...` 中。浏览器提取后通过 POST 兑换，不把凭据放入 HTTP 查询参数。服务端限流配对尝试。设备撤销/退出后对应登录与实时连接都失效。
 
-| 方法与路径                                  | 请求 / 响应                                                                             |
-| ------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `GET /api/v1/health`                        | 无需配对；`{ ok: true }`，仅代表网关可响应                                              |
-| `POST /api/v1/pair`                         | `{ token, name? }` → `{ device }` + cookie；凭据 5 分钟、一次有效                       |
-| `GET /api/v1/bootstrap`                     | `Bootstrap`：设备、允许项目、后端连接、能力                                             |
-| `GET /api/v1/threads?cursor=...&search=...` | `{ data: ThreadSummary[], nextCursor }`                                                 |
-| `GET /api/v1/threads/:id?cursor=...`        | `ThreadSnapshot`：会话、消息、历史游标、待处理请求、设置、`eventCursor: { epoch, seq }` |
-| `GET /api/v1/models`                        | `{ data: ModelOption[] }`                                                               |
-| `GET /api/v1/devices`                       | `{ data: Device[] }`，标记当前设备                                                      |
-| `DELETE /api/v1/devices/:id`                | `{ ok: true }`，撤销设备                                                                |
-| `POST /api/v1/logout`                       | `{ ok: true }`，撤销当前设备并清理 cookie                                               |
-| `POST /api/v1/uploads`                      | 原始图片字节，Content-Type 为实际图片 MIME → `201 { id, url }`                          |
-| `GET /api/v1/uploads/:id`                   | 返回网关管理的图片，需要设备登录                                                        |
+| 方法与路径                                          | 请求 / 响应                                                                             |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `GET /api/v1/health`                                | 无需配对；`{ ok: true }`，仅代表网关可响应                                              |
+| `POST /api/v1/pair`                                 | `{ token, name? }` → `{ device }` + cookie；凭据 5 分钟、一次有效                       |
+| `GET /api/v1/bootstrap`                             | `Bootstrap`：设备、允许项目、后端连接、能力                                             |
+| `GET /api/v1/threads?cursor=...&search=...&cwd=...` | `{ data: ThreadSummary[], nextCursor }`                                                 |
+| `GET /api/v1/workspaces`                            | `{ data: WorkspaceSummary[] }`，全部会话分页按工作路径聚合                              |
+| `GET /api/v1/threads/:id?cursor=...`                | `ThreadSnapshot`：会话、消息、历史游标、待处理请求、设置、`eventCursor: { epoch, seq }` |
+| `GET /api/v1/models`                                | `{ data: ModelOption[] }`                                                               |
+| `GET /api/v1/devices`                               | `{ data: Device[] }`，标记当前设备                                                      |
+| `DELETE /api/v1/devices/:id`                        | `{ ok: true }`，撤销设备                                                                |
+| `POST /api/v1/logout`                               | `{ ok: true }`，撤销当前设备并清理 cookie                                               |
+| `POST /api/v1/uploads`                              | 原始图片字节，Content-Type 为实际图片 MIME → `201 { id, url }`                          |
+| `GET /api/v1/uploads/:id`                           | 返回网关管理的图片，需要设备登录                                                        |
+
+会话列表中的 `cwd` 为可选的完整工作路径精确筛选，可与标题搜索 `search` 和分页游标一起使用。省略表示全部路径，`cwd=` 表示没有记录路径的会话；切换筛选条件时从首页重新查询，不复用旧游标。`workspaces` 返回 `{ cwd, threadCount, activeCount, updatedAt }`，时间为毫秒时间戳，按最近更新时间倒序排列；汇总所有未归档、符合当前会话来源筛选的历史分页，同一会话去重计数。该接口需要配对，并且不限制在配置的新建项目列表中。
 
 图片支持 PNG、JPEG、WebP，单张上限 10 MiB；服务端核对文件签名与 MIME。每次发送最多 8 张。API 不接受任意本地文件路径；上传返回的 ID 用于后续发送。未被消息引用的过期上传在网关启动时清理，已引用图片保留。
 

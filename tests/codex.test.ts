@@ -217,6 +217,179 @@ test('connects only to existing Unix socket, negotiates experimental protocol, l
   assert.equal(JSON.stringify(f.adapter.connection).includes('/private/not-forwarded'), false);
 });
 
+test('thread lists preserve exact native cwd filters alongside search and pagination', async (t) => {
+  const f = fixture(t);
+  await f.adapter.connect();
+  await f.adapter.listThreads({
+    cwd: '/one/同名 repo',
+    search: 'task title',
+    cursor: 'next/cursor+1',
+  });
+  const params = requests(f.socket, 'thread/list')[0].params;
+  assert.equal(params.cwd, '/one/同名 repo');
+  assert.equal(params.searchTerm, 'task title');
+  assert.equal(params.cursor, 'next/cursor+1');
+  assert.equal(params.limit, 40);
+  assert.equal((await f.adapter.listThreads({ cwd: '/project' })).data.length, 1);
+  // Protect exact grouping even if the native server normalizes the query path.
+  assert.deepEqual((await f.adapter.listThreads({ cwd: '/project/..' })).data, []);
+  await f.adapter.listThreads();
+  assert.equal('cwd' in requests(f.socket, 'thread/list').at(-1)!.params, false);
+});
+
+test('empty cwd browsing scans all pages instead of using native home normalization, with scoped search cursors', async (t) => {
+  let addNewThread = false;
+  const emptyThreads = Array.from({ length: 45 }, (_, i) =>
+    baseThread({
+      id: `empty-${String(i).padStart(3, '0')}`,
+      name: `Match task ${i}`,
+      cwd: i === 44 ? undefined : '',
+      updatedAt: 100 + Math.floor(i / 2),
+    }),
+  );
+  const home = baseThread({ id: 'home', name: 'Match task home', cwd: '/Users/test' });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/list') return false;
+      // Match the real backend's surprising behavior for a blank cwd filter.
+      if (message.params.cwd === '') {
+        socket.reply(message, { data: [home], nextCursor: null });
+      } else if (!message.params.cursor) {
+        assert.equal('searchTerm' in message.params, false);
+        socket.reply(message, {
+          data: Array.from({ length: 200 }, (_, i) => ({ ...home, id: `home-${i}` })),
+          nextCursor: 'empty-page-2',
+        });
+      } else {
+        assert.equal(message.params.cursor, 'empty-page-2');
+        socket.reply(message, {
+          data: [
+            ...emptyThreads,
+            baseThread({ id: 'different-title', name: 'Different', cwd: '', updatedAt: 500 }),
+            ...(addNewThread
+              ? [baseThread({ id: 'new-match', name: 'Match new', cwd: '', updatedAt: 1000 })]
+              : []),
+          ],
+          nextCursor: null,
+        });
+      }
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const first = await f.adapter.listThreads({ cwd: '', search: 'match' });
+  assert.equal(first.data.length, 40);
+  assert.equal(
+    first.data.every((thread) => thread.cwd === ''),
+    true,
+  );
+  const cursor = first.nextCursor;
+  assert.ok(cursor);
+  assert.ok(cursor.startsWith('phone-empty-cwd-v1:'));
+  assert.equal(requests(f.socket, 'thread/list').length, 2);
+  addNewThread = true;
+  const last = await f.adapter.listThreads({ cwd: '', search: 'match', cursor });
+  assert.equal(last.data.length, 5);
+  assert.equal(last.nextCursor, null);
+  assert.deepEqual(
+    [...first.data, ...last.data].map((thread) => thread.id).sort(),
+    emptyThreads.map((thread) => thread.id).sort(),
+  );
+  const calls = requests(f.socket, 'thread/list').length;
+  for (const options of [
+    { cwd: '', search: 'different', cursor },
+    { cwd: '/Users/test', search: 'match', cursor },
+    { search: 'match', cursor },
+    { cwd: '', search: 'match', cursor: 'native-cursor' },
+  ])
+    await assert.rejects(f.adapter.listThreads(options), { code: 'INVALID_CURSOR' });
+  assert.equal(requests(f.socket, 'thread/list').length, calls);
+  assert.equal(
+    requests(f.socket, 'thread/list').some((request) => request.params.cwd === ''),
+    false,
+  );
+});
+
+test('workspace scans traverse every page, deduplicate sessions, keep exact paths and apply live status', async (t) => {
+  const firstPage = Array.from({ length: 200 }, (_, i) =>
+    baseThread({
+      id: `thread-${i}`,
+      cwd: '/one/repo',
+      updatedAt: 100 + i,
+      status: { type: i === 0 ? 'active' : 'idle' },
+    }),
+  );
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/list') return false;
+      assert.equal(message.params.limit, 200);
+      assert.equal(message.params.archived === true, false);
+      assert.equal('cwd' in message.params, false);
+      assert.equal('searchTerm' in message.params, false);
+      assert.equal('useStateDbOnly' in message.params, false);
+      if (!message.params.cursor) {
+        socket.reply(message, { data: firstPage, nextCursor: 'page-2' });
+      } else {
+        assert.equal(message.params.cursor, 'page-2');
+        socket.push({
+          method: 'thread/status/changed',
+          params: { threadId: 'thread-1', status: { type: 'active' } },
+        });
+        socket.reply(message, {
+          data: [
+            firstPage[0],
+            baseThread({ id: 'thread-199', cwd: '/old/path', updatedAt: 1 }),
+            baseThread({
+              id: 'thread-200',
+              cwd: '/two/repo',
+              updatedAt: 300,
+              status: { type: 'active' },
+            }),
+            baseThread({ id: 'thread-201', cwd: '', updatedAt: 300 }),
+            baseThread({ id: 'thread-202', cwd: '/one/repo', updatedAt: 301 }),
+            baseThread({ id: 'thread-203', cwd: '/else/repo', updatedAt: 300 }),
+            baseThread({ id: 'thread-204', cwd: undefined, updatedAt: 200 }),
+          ],
+          nextCursor: null,
+        });
+      }
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const first = f.adapter.listWorkspaces();
+  assert.equal(f.adapter.listWorkspaces(), first);
+  assert.deepEqual(await first, [
+    { cwd: '/one/repo', threadCount: 201, activeCount: 2, updatedAt: 301_000 },
+    { cwd: '', threadCount: 2, activeCount: 0, updatedAt: 300_000 },
+    { cwd: '/else/repo', threadCount: 1, activeCount: 0, updatedAt: 300_000 },
+    { cwd: '/two/repo', threadCount: 1, activeCount: 1, updatedAt: 300_000 },
+  ]);
+  assert.equal(requests(f.socket, 'thread/list').length, 2);
+});
+
+test('workspace scans reject cursor cycles without partial results and can be retried', async (t) => {
+  let cyclic = true;
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/list') return false;
+      socket.reply(message, {
+        data: [baseThread()],
+        nextCursor: cyclic ? 'repeated-cursor' : null,
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  await assert.rejects(f.adapter.listWorkspaces(), { code: 'INVALID_PAGINATION' });
+  assert.equal(requests(f.socket, 'thread/list').length, 2);
+  cyclic = false;
+  assert.deepEqual(await f.adapter.listWorkspaces(), [
+    { cwd: '/project', threadCount: 1, activeCount: 0, updatedAt: 1_800_000_000_000 },
+  ]);
+  assert.equal(requests(f.socket, 'thread/list').at(-1)?.params.cursor, undefined);
+});
+
 test('passive subscription preserves backend settings and pages chronological items with original image paths', async (t) => {
   const f = fixture(t, { active: true });
   await f.adapter.connect();

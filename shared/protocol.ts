@@ -11,6 +11,12 @@ export interface ThreadSummary {
   source?: string;
   canAcceptDirectInput?: boolean;
 }
+export interface WorkspaceSummary {
+  cwd: string;
+  threadCount: number;
+  activeCount: number;
+  updatedAt: number;
+}
 export interface SessionSettings {
   model?: string;
   effort?: string;

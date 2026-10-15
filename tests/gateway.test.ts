@@ -17,10 +17,16 @@ class FakeCodex extends EventEmitter {
   connection = { connected: true, message: 'Connected', sharedBackend: true };
   capabilities = { images: true, planMode: true, liveControl: true };
   calls = 0;
+  listOptions?: { cursor?: string; search?: string; cwd?: string };
   close() {}
-  async listThreads() {
+  async listThreads(options: { cursor?: string; search?: string; cwd?: string }) {
     this.calls++;
+    this.listOptions = options;
     return { data: [], nextCursor: null };
+  }
+  async listWorkspaces() {
+    this.calls++;
+    return [{ cwd: '/project', threadCount: 41, activeCount: 2, updatedAt: 1000 }];
   }
   async models() {
     return [];
@@ -162,6 +168,35 @@ test('HTTP enforces auth, host/origin and CSRF; revoked session immediately fail
     });
     assert.equal(revoked.status, 200);
     assert.equal((await f.request('/api/v1/bootstrap', { cookie })).status, 401);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('workspace catalog requires authentication and thread routes preserve exact cwd with search and cursor', async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.request('/api/v1/workspaces')).status, 401);
+    assert.equal(f.codex.calls, 0);
+    const paired = f.gateway.auth.pair(f.gateway.auth.createPairing().token, 'Phone')!;
+    const cookie = 'codex_phone=' + paired.token;
+    const catalog = await f.request('/api/v1/workspaces', { cookie });
+    assert.equal(catalog.status, 200);
+    assert.deepEqual(catalog.json(), {
+      data: [{ cwd: '/project', threadCount: 41, activeCount: 2, updatedAt: 1000 }],
+    });
+    const options = { cwd: '/Users/test/同名 repo', search: '关键词', cursor: 'next/cursor+1' };
+    assert.equal(
+      (await f.request('/api/v1/threads?' + new URLSearchParams(options), { cookie })).status,
+      200,
+    );
+    assert.deepEqual(f.codex.listOptions, options);
+    await f.request('/api/v1/threads?cwd=', { cookie });
+    assert.equal(f.codex.listOptions?.cwd, '');
+    await f.request('/api/v1/threads', { cookie });
+    assert.equal(f.codex.listOptions?.cwd, undefined);
+    f.gateway.auth.revoke(paired.device.id);
+    assert.equal((await f.request('/api/v1/workspaces', { cookie })).status, 401);
   } finally {
     await f.cleanup();
   }

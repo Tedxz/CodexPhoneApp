@@ -14,6 +14,7 @@ import type {
   SessionSettings,
   ThreadSnapshot,
   ThreadSummary,
+  WorkspaceSummary,
 } from '../shared/protocol.js';
 
 // Wire names/shapes are pinned to codex app-server 0.162.1 generated TypeScript.
@@ -82,6 +83,7 @@ const source = (v: unknown): string =>
 const rpcKey = (id: RpcId): string => `${typeof id}:${id}`;
 const knownEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const readCursorPrefix = 'phone-read-v1:';
+const emptyCwdCursorPrefix = 'phone-empty-cwd-v1:';
 
 /** Shared-backend client: never launches an app-server or reads rollout files. */
 export class CodexAdapter extends EventEmitter {
@@ -110,6 +112,8 @@ export class CodexAdapter extends EventEmitter {
   private reconnectTimer?: NodeJS.Timeout;
   private retry = 0;
   private modelCache?: { at: number; data: ModelOption[] };
+  private workspaceScan?: Promise<WorkspaceSummary[]>;
+  private threadScan?: Promise<ThreadSummary[]>;
   private itemsListSupported: boolean | undefined;
   private _connection: ConnectionState = {
     connected: false,
@@ -416,25 +420,147 @@ export class CodexAdapter extends EventEmitter {
       ...(mode.mode === 'plan' || mode.mode === 'default' ? { mode: mode.mode } : {}),
     });
   }
-  async listThreads(
-    options: { cursor?: string; search?: string } = {},
-  ): Promise<{ data: ThreadSummary[]; nextCursor: string | null }> {
-    const revision = this.revision;
-    const r = record(
+  private async threadPage(
+    options: { cursor?: string; search?: string; cwd?: string },
+    limit = 40,
+  ): Promise<ObjectValue> {
+    return record(
       await this.rpc('thread/list', {
-        limit: 40,
+        limit,
         sortKey: 'updated_at',
         sortDirection: 'desc',
         modelProviders: [],
         sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'],
-        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
         ...(options.search ? { searchTerm: options.search } : {}),
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
       }),
     );
+  }
+  async listThreads(
+    options: { cursor?: string; search?: string; cwd?: string } = {},
+  ): Promise<{ data: ThreadSummary[]; nextCursor: string | null }> {
+    if (options.cwd === '') return this.listEmptyCwdThreads(options);
+    if (options.cursor?.startsWith(emptyCwdCursorPrefix))
+      throw new CodexError('INVALID_CURSOR', '工作路径已改变，请重新加载会话列表');
+    const revision = this.revision;
+    const r = await this.threadPage(options);
     return {
-      data: array(r.data).map((t) => this.remember(t, revision)),
+      data: array(r.data)
+        .map((t) => this.remember(t, revision))
+        .filter((t) => options.cwd === undefined || t.cwd === options.cwd),
       nextCursor: typeof r.nextCursor === 'string' ? r.nextCursor : null,
     };
+  }
+  private async listEmptyCwdThreads(options: { cursor?: string; search?: string }): Promise<{
+    data: ThreadSummary[];
+    nextCursor: string | null;
+  }> {
+    const search = options.search ?? '';
+    let before: { id: string; updatedAt: number } | undefined;
+    if (options.cursor) {
+      try {
+        if (!options.cursor.startsWith(emptyCwdCursorPrefix)) throw new Error();
+        const encoded = options.cursor.slice(emptyCwdCursorPrefix.length);
+        const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+        if (Buffer.from(decoded).toString('base64url') !== encoded) throw new Error();
+        const value = record(JSON.parse(decoded));
+        if (
+          value.search !== search ||
+          typeof value.id !== 'string' ||
+          !value.id ||
+          typeof value.updatedAt !== 'number' ||
+          !Number.isFinite(value.updatedAt)
+        )
+          throw new Error();
+        before = { id: value.id, updatedAt: value.updatedAt };
+      } catch {
+        throw new CodexError('INVALID_CURSOR', '工作路径或搜索条件已改变，请重新加载会话列表');
+      }
+    }
+    // The shared server resolves cwd:'' to the user's home directory. Select
+    // genuinely missing paths ourselves rather than exposing those home threads.
+    const threads = (await this.allThreads())
+      .filter(
+        (thread) =>
+          thread.cwd === '' &&
+          thread.title.toLowerCase().includes(search.toLowerCase()) &&
+          (!before ||
+            thread.updatedAt < before.updatedAt ||
+            (thread.updatedAt === before.updatedAt && thread.id > before.id)),
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const data = threads.slice(0, 40),
+      last = data.at(-1);
+    return {
+      data,
+      nextCursor:
+        threads.length > data.length && last
+          ? emptyCwdCursorPrefix +
+            Buffer.from(
+              JSON.stringify({ search, id: last.id, updatedAt: last.updatedAt }),
+            ).toString('base64url')
+          : null,
+    };
+  }
+  listWorkspaces(): Promise<WorkspaceSummary[]> {
+    this.workspaceScan ??= this.scanWorkspaces().finally(() => {
+      this.workspaceScan = undefined;
+    });
+    return this.workspaceScan;
+  }
+  private async scanWorkspaces(): Promise<WorkspaceSummary[]> {
+    const workspaces = new Map<string, WorkspaceSummary>();
+    for (const thread of await this.allThreads()) {
+      const workspace = workspaces.get(thread.cwd) ?? {
+        cwd: thread.cwd,
+        threadCount: 0,
+        activeCount: 0,
+        updatedAt: 0,
+      };
+      workspace.threadCount++;
+      if (thread.status === 'active') workspace.activeCount++;
+      workspace.updatedAt = Math.max(workspace.updatedAt, thread.updatedAt);
+      workspaces.set(thread.cwd, workspace);
+    }
+    return [...workspaces.values()].sort(
+      (a, b) => b.updatedAt - a.updatedAt || (a.cwd < b.cwd ? -1 : a.cwd > b.cwd ? 1 : 0),
+    );
+  }
+  private allThreads(): Promise<ThreadSummary[]> {
+    this.threadScan ??= this.scanThreads().finally(() => {
+      this.threadScan = undefined;
+    });
+    return this.threadScan;
+  }
+  private async scanThreads(): Promise<ThreadSummary[]> {
+    const revision = this.revision;
+    const threads = new Map<string, ObjectValue>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      // Retain thread/list's metadata repair so older sessions missing from the
+      // state index are included, without reading Codex's files ourselves.
+      const page = await this.threadPage({ cursor }, 200);
+      for (const raw of array(page.data)) {
+        const thread = record(raw),
+          id = str(thread.id),
+          before = threads.get(id);
+        if (!before || Number(thread.updatedAt ?? 0) >= Number(before.updatedAt ?? 0))
+          threads.set(id, thread);
+      }
+      cursor = typeof page.nextCursor === 'string' ? page.nextCursor : undefined;
+      if (cursor !== undefined) {
+        if (cursors.has(cursor))
+          throw new CodexError(
+            'INVALID_PAGINATION',
+            'Codex 会话列表返回重复分页游标，无法完整读取工作路径',
+          );
+        cursors.add(cursor);
+      }
+    } while (cursor !== undefined);
+    // Apply notifications received during the scan before calculating counts.
+    return [...threads.values()].map((raw) => this.remember(raw, revision));
   }
   async snapshot(threadId: string, cursor?: string): Promise<ThreadSnapshot> {
     const readId = ++this.snapshotSequence;
