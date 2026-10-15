@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-15T15:34:03.271Z",
+  "threadId": "01a14032-7c65-7742-a61c-40733b0d9276",
+  "workspace": "/Users/xiezheng/Code/CodexPhoneApp/tmp/browser-acceptance/1792078412200/workspace",
+  "checks": [
+    {
+      "name": "lan_pair_and_list",
+      "status": "passed",
+      "evidence": {
+        "viewport": "390x844",
+        "threadCount": 40,
+        "hashCleared": true
+      }
+    },
+    {
+      "name": "create_from_mobile_ui",
+      "status": "passed",
+      "evidence": {
+        "threadId": "01a14032-7c65-7742-a61c-40733b0d9276"
+      }
+    },
+    {
+      "name": "real_text_stream",
+      "status": "passed",
+      "evidence": {
+        "deltas": 10
+      }
+    },
+    {
+      "name": "draft_and_refresh",
+      "status": "passed",
+      "evidence": {
+        "draftRestored": true,
+        "historyRestored": true
+      }
+    },
+    {
+      "name": "image_upload_and_understanding",
+      "status": "passed",
+      "evidence": {
+        "unauthorizedImageStatus": 401,
+        "recognizedColor": true
+      }
+    },
+    {
+      "name": "offline_reconnect",
+      "status": "passed",
+      "evidence": {
+        "noDuplicateUserMessage": true
+      }
+    },
+    {
+      "name": "mobile_layout",
+      "status": "passed",
+      "evidence": {
+        "noHorizontalOverflow": true,
+        "sendButtonVisible": true
+      }
+    },
+    {
+      "name": "plan_mode_and_question",
+      "status": "passed",
+      "evidence": {
+        "mode": "plan",
+        "questionAnswered": true
+      }
+    },
+    {
+      "name": "revoke_device_ui",
+      "status": "passed",
+      "evidence": {
+        "returnedToPairing": true
+      }
+    }
+  ],
+  "pageErrors": []
+}

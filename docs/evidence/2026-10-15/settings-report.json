@@ -1,0 +1,10 @@
+{
+  "result": "passed",
+  "threadId": "01a14047-4858-7bc1-954a-5b3f2512e004",
+  "settings": {
+    "model": "gpt-6.1-sol",
+    "effort": "low",
+    "mode": "plan"
+  },
+  "status": "idle"
+}

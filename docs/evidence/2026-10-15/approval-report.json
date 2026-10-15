@@ -1,0 +1,66 @@
+{
+  "runId": "2026-10-15T15-41-43-828Z-0ddf52",
+  "startedAt": "2026-10-15T15:41:43.829Z",
+  "result": "passed",
+  "checks": [
+    {
+      "name": "connect_shared_backend",
+      "status": "passed",
+      "evidence": {}
+    },
+    {
+      "name": "create_isolated_readonly_thread",
+      "status": "passed",
+      "evidence": {
+        "sandbox": "readOnly",
+        "approvalPolicy": "on-request",
+        "approvalsReviewer": "user"
+      }
+    },
+    {
+      "name": "warmup_persist",
+      "status": "passed",
+      "evidence": {}
+    },
+    {
+      "name": "gateway_pair_and_subscribe",
+      "status": "passed",
+      "evidence": {
+        "authenticatedHttpPairing": true,
+        "authenticatedWebSocket": true
+      }
+    },
+    {
+      "name": "trigger_file_change_approval",
+      "status": "passed",
+      "evidence": {
+        "kind": "fileChange",
+        "rawOwnerAlsoReceived": true
+      }
+    },
+    {
+      "name": "accept_through_gateway_websocket",
+      "status": "passed",
+      "evidence": {
+        "absentBeforeApproval": true,
+        "exactNonceFile": true,
+        "requestResolvedEvent": true,
+        "turnCompleted": true
+      }
+    },
+    {
+      "name": "expired_approval_rejected",
+      "status": "passed",
+      "evidence": {}
+    },
+    {
+      "name": "cleanup_own_turn",
+      "status": "passed",
+      "evidence": {
+        "activeTurnStopped": true
+      }
+    }
+  ],
+  "threadId": "01a14039-fa1b-7c13-846c-d8552dd36bfd",
+  "finishedAt": "2026-10-15T15:42:01.448Z"
+}

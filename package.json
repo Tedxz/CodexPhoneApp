@@ -1,0 +1,43 @@
+{
+  "name": "codex-phone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node --import tsx server/main.ts",
+    "web:dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "start": "node --import tsx server/main.ts",
+    "pair": "node --import tsx server/cli.ts pair",
+    "devices": "node --import tsx server/cli.ts devices",
+    "revoke": "node --import tsx server/cli.ts revoke",
+    "doctor": "node --import tsx scripts/doctor.ts",
+    "test:live": "node --import tsx scripts/live-acceptance.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm test && npm run build"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "prettier": "3.9.10",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.1"
+  }
+}

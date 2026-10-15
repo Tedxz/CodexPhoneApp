@@ -1,0 +1,16 @@
+{
+  "hashCleared": true,
+  "tokenPrefilled": true,
+  "pairing": true,
+  "threadListCount": 40,
+  "models": {
+    "status": 200,
+    "count": 7
+  },
+  "noHorizontalOverflow": true,
+  "newDialogModelOptions": 8,
+  "pairReplayStatus": 401,
+  "csrfRejectedStatus": 403,
+  "revokedSessionReturnsToPairing": true,
+  "errors": []
+}

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.codex-phone/
+coverage/
+tmp/
+*.log
+.env
+.env.*
+!.env.example
+config.local.json
+.DS_Store
+*.tsbuildinfo
+*.pem
+*.key
+*.p12
+*.pfx
