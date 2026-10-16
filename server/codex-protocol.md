@@ -11,6 +11,21 @@ connection. Initialization opts into experimental APIs. Plan mode is enabled
 only if `collaborationMode/list` advertises it. A passive `thread/resume` does not
 override permissions, cwd, model, or approval routing.
 
+When a passive resume returns exactly `-32600: thread <id> already has an active
+writer` for the requested thread, the adapter marks its snapshot `readOnly: true`
+and reads the persisted history without resuming again. The normal read-only
+metadata and history pagination APIs remain usable; this path neither steals the
+writer nor changes the owning instance. Sends, interrupts, and approval responses
+are rejected with `THREAD_READ_ONLY`, including direct API calls. Pending requests
+are not exposed for a read-only thread. Unrelated resume errors and unavailable
+history still fail normally rather than showing fabricated empty history.
+
+Ordinary refreshes, older-page reads, and reconnects preserve the read-only state.
+Only an explicit `thread.subscribe` with `retryWrite: true` retries resume. A
+successful resume clears the restriction; a continued writer conflict leaves the
+thread readable. Persisted history may lag the owning instance, so refreshing a
+read-only thread is not a guarantee of live notification delivery.
+
 History first uses `thread/items/list`. The running 0.162.1 shared server was
 observed returning `-32601: thread/items/list is not supported yet`, despite the
 generated schema containing it. Only that method-not-found error enables the

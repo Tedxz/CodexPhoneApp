@@ -20,6 +20,7 @@ function copySnapshot(snapshot: ThreadSnapshot): ThreadSnapshot {
     pendingRequests: snapshot.pendingRequests,
     settings: snapshot.settings,
     warning: snapshot.warning,
+    readOnly: snapshot.readOnly,
     eventCursor: snapshot.eventCursor
   };
 }
@@ -130,6 +131,8 @@ export class SnapshotTracker {
     }
     let result = copySnapshot(incoming);
     result.items = mergeItems(sameThread ? sameThread.items : [], incoming.items, prepend);
+    // History pages describe older content, never the current writer access.
+    if (prepend && sameThread) result.readOnly = sameThread.readOnly;
     if (!cursor) return result;
     this.events.forEach((envelope: EventEnvelope) => {
       if (envelope.epoch !== cursor.epoch || envelope.seq <= cursor.seq) return;

@@ -33,7 +33,7 @@ export struct SettingsControls {
   }
 
   private effortOptions(): SelectOption[] {
-    const result: SelectOption[] = [{ value: '默认强度' }];
+    const result: SelectOption[] = [{ value: 'default' }];
     this.efforts().forEach((effort: string) => result.push({ value: effort }));
     return result;
   }
@@ -58,7 +58,7 @@ export struct SettingsControls {
         Text('推理').fontSize(11).fontColor(MUTED).width(36)
         Select(this.effortOptions())
           .selected(this.settings.effort ? this.efforts().indexOf(this.settings.effort) + 1 : 0)
-          .value(this.settings.effort || '默认强度')
+          .value(this.settings.effort || 'default')
           .font({ size: 13 })
           .fontColor(GREEN)
           .backgroundColor(CARD_BACKGROUND)

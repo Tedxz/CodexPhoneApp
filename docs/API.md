@@ -79,13 +79,17 @@ SSH 目标发送图片前，网关先经 SFTP 上传到配置的私有目录，�
 
 | method             | params                                                                   | 成功结果                                             |
 | ------------------ | ------------------------------------------------------------------------ | ---------------------------------------------------- |
-| `thread.subscribe` | `{ threadId }`                                                           | `ThreadSnapshot`，连接并同步会话                     |
+| `thread.subscribe` | `{ threadId, retryWrite? }`                                              | `ThreadSnapshot`，连接并同步会话                     |
 | `thread.create`    | `{ projectId, model?, effort?, mode? }`                                  | `ThreadSnapshot`                                     |
 | `turn.send`        | `{ threadId, text, imageIds?, expectedTurnId?, model?, effort?, mode? }` | 新轮次 `{ turnId, status }`；运行中追加 `{ turnId }` |
 | `turn.interrupt`   | `{ threadId, turnId }`                                                   | Codex 停止结果                                       |
 | `request.respond`  | `{ requestId, decision? , answers? }`                                    | 审批/交互结果                                        |
 
 `mode` 为 `default` 或 `plan`。审批 decision 为 `accept`、`decline` 或 `cancel`；交互 answers 为 `{ [questionId]: string[] }`。客户端按 `PendingRequest.kind` 和允许选项绘制控件，不提交无法识别的审批。
+
+当接入会话遇到该会话已有 active writer 的确切错误时，`thread.subscribe` 改为读取历史，并返回 `ThreadSnapshot.readOnly: true`。只读状态下仍可读取、刷新及分页查看历史，网关拒绝发送、停止任务和审批回复，返回 `THREAD_READ_ONLY`。未提供 `readOnly` 的旧响应按原有行为处理。客户端应保留草稿，并禁用写入控件。
+
+只读会话的普通订阅、刷新和后端重连不会再次尝试取得写入权限。用户点击「尝试恢复编辑」时，客户端显式发送 `retryWrite: true`；若仍被占用则继续只读，接入成功后返回可编辑快照。`retryWrite` 必须为布尔值，重试不会发送消息、停止其他客户端的任务或自动提交草稿。只读内容来自已保存历史，刷新可读取新内容，不保证提供原客户端的实时流。
 
 运行中发送用 `expectedTurnId` 绑定当前轮次，通过后端追加指令；空闲时启动新轮次。发送结果仅返回网关规范化后的轮次标识与可选状态，不透传完整 Codex 轮次对象。两个并发发送不能悄悄覆盖。过期、已由其他端处理的审批应重新同步。
 

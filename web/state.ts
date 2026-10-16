@@ -111,6 +111,9 @@ export class SnapshotTracker {
     );
     let result: ThreadSnapshot = {
       ...incoming,
+      // History pages can arrive after an explicit access retry. Only a fresh
+      // subscription may change whether the current conversation is writable.
+      ...(prepend && sameThread ? { readOnly: sameThread.readOnly } : {}),
       items: mergeItems(sameThread?.items ?? [], incoming.items, prepend),
     };
     if (!cursor) return result;

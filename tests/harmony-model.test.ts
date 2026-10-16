@@ -7,6 +7,7 @@ import type {
   Bootstrap,
   Device,
   EventEnvelope,
+  SessionSettings,
   ThreadSnapshot,
   ThreadSummary,
   WorkspaceSummary,
@@ -118,6 +119,7 @@ interface StateModule {
   SnapshotTracker: new () => NativeTracker;
   EventCursor: new () => { accept(event: EventEnvelope): string };
   mergeItems: typeof import('../web/state').mergeItems;
+  applyEvent: typeof import('../web/state').applyEvent;
 }
 const state = nativeModule<StateModule>('model/State');
 
@@ -166,6 +168,17 @@ test('Harmony snapshot reconciliation preserves live deltas once across snapshot
     withHistory.items.map((item) => item.text),
     ['Old', 'A B'],
   );
+});
+
+test('Harmony live events preserve read-only access and older pages cannot replace the current writer state', () => {
+  const tracker = new state.SnapshotTracker();
+  const current = { ...snapshot('current', 2), readOnly: true };
+  assert.equal(state.applyEvent(current, delta(3, ' updated').event)?.readOnly, true);
+  const oldPage = { ...snapshot('older', 1), readOnly: false };
+  assert.equal(tracker.reconcile(current, oldPage, true).readOnly, true);
+  const editable = { ...current, readOnly: false };
+  assert.equal(tracker.reconcile(editable, { ...oldPage, readOnly: true }, true).readOnly, false);
+  assert.equal(tracker.reconcile(editable, { ...oldPage, readOnly: true }).readOnly, true);
 });
 
 test('Harmony cursors detect epoch/gap changes and settle cached running items after interruption', () => {
@@ -836,6 +849,10 @@ interface NativeAppStore {
   search: string;
   searchTimer: number;
   draft: string;
+  attachments: { id: string; url: string; name: string; localUri: string }[];
+  settings: SessionSettings;
+  readOnly: boolean;
+  retryingWrite: boolean;
   snapshot?: ThreadSnapshot;
   threads: ThreadSummary[];
   sending: boolean;
@@ -851,6 +868,12 @@ interface NativeAppStore {
   selectWorkspace(cwd: string): void;
   chooseThread(id: string): Promise<void>;
   setDraft(text: string): void;
+  setModel(value: string): void;
+  setEffort(value: string): void;
+  setSessionMode(value: string): void;
+  pickImages(): Promise<void>;
+  removeAttachment(id: string): void;
+  tryResumeEditing(): Promise<void>;
   initialize(context: StoreContext): Promise<void>;
   refresh(): Promise<void>;
   send(): Promise<void>;
@@ -875,6 +898,7 @@ function mockedStore() {
     identify: [] as { origin: string; cookie: string; key: string }[],
     pair: [] as { origin: string; cookie: string; key: string; token: string; name: string }[],
     cleared: [] as string[],
+    imageSelections: 0,
   };
   const prefs: StorePreferences = {
     get: async (key, fallback) => preferences.get(key) ?? fallback,
@@ -914,6 +938,7 @@ function mockedStore() {
     snapshot: async (_id: string, _cursor?: string): Promise<ThreadSnapshot> =>
       snapshot('confirmed', 4),
     revoke: async (_id: string): Promise<void> => {},
+    photoSelection: async (): Promise<{ photoUris: string[] }> => ({ photoUris: [] }),
   };
   class FakeGatewayError extends Error {
     constructor(
@@ -1001,7 +1026,20 @@ function mockedStore() {
     ['@kit.ArkTS', { util: { generateRandomUUID: () => `generated-${++generatedIds}` } }],
     ['@kit.ArkData', { preferences: { getPreferences: async () => prefs } }],
     ['@kit.CoreFileKit', { fileIo: {} }],
-    ['@kit.MediaLibraryKit', { photoAccessHelper: {} }],
+    [
+      '@kit.MediaLibraryKit',
+      {
+        photoAccessHelper: {
+          PhotoViewMIMETypes: { IMAGE_TYPE: 'image/*' },
+          PhotoViewPicker: class {
+            select() {
+              calls.imageSelections++;
+              return responses.photoSelection();
+            }
+          },
+        },
+      },
+    ],
     ['@kit.ImageKit', { image: {} }],
     ['../transport/GatewayApi', { GatewayApi: FakeGateway, GatewayError: FakeGatewayError }],
     ['../transport/NativeLiveClient', { NativeLiveClient: FakeLive }],
@@ -1378,6 +1416,152 @@ test('Harmony native store ignores late list and thread replies after the user c
     await oldChoice;
     assert.equal(store.snapshot?.thread.id, 'new');
     assert.equal(store.snapshot?.items[0].text, 'latest');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony opens read-only history, refreshes without requesting a writer and preserves drafts and attachments', async () => {
+  const { store, responses, preferences, calls, activate } = mockedStore();
+  activate();
+  const commands: { method: string; params: object }[] = [];
+  let reads = 0;
+  responses.command = async (method, params) => {
+    commands.push({ method, params: JSON.parse(params) as object });
+    return JSON.stringify({ ...snapshot(`history ${++reads}`, reads), readOnly: true });
+  };
+  store.selected = 'thread';
+  store.draft = 'keep this draft';
+  const attachment = {
+    id: 'image',
+    url: '/api/v1/uploads/image.png',
+    name: 'image',
+    localUri: 'file:///image.png',
+  };
+  store.attachments = [attachment];
+  try {
+    await store.chooseThread('thread');
+    assert.equal(store.readOnly, true);
+    assert.equal(store.snapshot?.items[0].text, 'history 1');
+    store.snapshot!.thread.activeTurnId = 'turn';
+    const settings = { model: 'original', effort: 'high', mode: 'default' as const };
+    store.settings = settings;
+    await store.send();
+    await store.interrupt();
+    await store.answerRequest('request', 'accept', []);
+    await store.pickImages();
+    store.removeAttachment('image');
+    store.setDraft('replace draft');
+    store.setModel('other');
+    store.setEffort('low');
+    store.setSessionMode('plan');
+    assert.equal(calls.imageSelections, 0);
+    assert.equal(store.error, '');
+    assert.equal(store.draft, 'keep this draft');
+    assert.deepEqual(store.attachments, [attachment]);
+    assert.deepEqual(store.settings, settings);
+    assert.equal(preferences.get('https://example.com|local|thread'), 'keep this draft');
+    await store.refresh();
+    assert.equal(store.snapshot?.items[0].text, 'history 2');
+    assert.equal(store.readOnly, true);
+    assert.deepEqual(commands, [
+      { method: 'thread.subscribe', params: { threadId: 'thread' } },
+      { method: 'thread.subscribe', params: { threadId: 'thread' } },
+    ]);
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony restores editing only through an explicit request and ignores stale refresh or history access flags', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  store.selected = 'thread';
+  store.snapshot = { ...snapshot('read-only history', 1), nextCursor: 'older', readOnly: true };
+  store.draft = 'preserved on restore';
+  const staleRefresh = deferred<string>();
+  const stalePage = deferred<ThreadSnapshot>();
+  const retry = deferred<string>();
+  const refreshStarted = deferred<void>();
+  const commands: { threadId: string; retryWrite?: boolean }[] = [];
+  responses.command = async (_method, params) => {
+    const parsed = JSON.parse(params) as { threadId: string; retryWrite?: boolean };
+    commands.push(parsed);
+    if (parsed.retryWrite) return retry.promise;
+    refreshStarted.resolve();
+    return staleRefresh.promise;
+  };
+  responses.snapshot = async () => stalePage.promise;
+  try {
+    const refresh = store.refresh();
+    await refreshStarted.promise;
+    const older = store.loadOlder();
+    const recovering = store.tryResumeEditing();
+    assert.equal(store.retryingWrite, true);
+    await store.tryResumeEditing();
+    retry.resolve(JSON.stringify({ ...snapshot('editable history', 3), readOnly: false }));
+    await recovering;
+    assert.equal(store.readOnly, false);
+    assert.equal(store.retryingWrite, false);
+    assert.equal(store.draft, 'preserved on restore');
+    staleRefresh.resolve(JSON.stringify({ ...snapshot('stale history', 2), readOnly: true }));
+    await refresh;
+    assert.equal(store.snapshot?.items[0].text, 'editable history');
+    assert.equal(store.readOnly, false);
+    const page = { ...snapshot('older', 1), readOnly: true };
+    page.items[0].id = 'older-message';
+    stalePage.resolve(page);
+    await older;
+    assert.equal(store.readOnly, false);
+    assert.deepEqual(
+      store.snapshot?.items.map((item) => item.text),
+      ['older', 'editable history'],
+    );
+    assert.deepEqual(commands, [{ threadId: 'thread' }, { threadId: 'thread', retryWrite: true }]);
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony failed editing recovery stays read-only without retrying a writer request automatically', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  store.selected = 'thread';
+  store.snapshot = { ...snapshot('history', 1), readOnly: true };
+  store.draft = 'preserved after failure';
+  let attempts = 0;
+  responses.command = async () => {
+    attempts++;
+    throw new Error(emptyRolloutError);
+  };
+  try {
+    await store.tryResumeEditing();
+    assert.equal(attempts, 1);
+    assert.equal(store.readOnly, true);
+    assert.equal(store.retryingWrite, false);
+    assert.equal(store.draft, 'preserved after failure');
+    assert.equal(store.error, emptyRolloutError);
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony stops image selection before reading or uploading when the session becomes read-only', async () => {
+  const { store, responses, calls, activate } = mockedStore();
+  activate();
+  store.selected = 'thread';
+  store.snapshot = snapshot('history', 1);
+  const selection = deferred<{ photoUris: string[] }>();
+  responses.photoSelection = async () => selection.promise;
+  try {
+    const choosing = store.pickImages();
+    assert.equal(calls.imageSelections, 1);
+    store.snapshot = { ...store.snapshot, readOnly: true };
+    selection.resolve({ photoUris: ['file:///new-image.png'] });
+    await choosing;
+    assert.equal(store.error, '');
+    assert.deepEqual(store.attachments, []);
+    assert.equal(store.uploading, false);
   } finally {
     store.dispose();
   }

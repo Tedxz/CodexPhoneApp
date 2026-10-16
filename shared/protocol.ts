@@ -53,6 +53,7 @@ export interface RequestAnswer {
 }
 export interface ThreadSnapshot {
   thread: ThreadSummary;
+  readOnly?: boolean;
   items: ConversationItem[];
   nextCursor: string | null;
   pendingRequests: PendingRequest[];

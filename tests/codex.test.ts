@@ -552,6 +552,239 @@ test('passive subscription preserves backend settings and pages chronological it
   assert.equal(requests(f.socket, 'turn/start').length, 0);
 });
 
+test('an active writer falls back to read-only history with pagination and no join retries', async (t) => {
+  const items = Array.from({ length: 65 }, (_, i) => ({
+    id: `item-${i}`,
+    type: 'agentMessage',
+    text: `persisted ${i}`,
+  }));
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method === 'thread/items/list') {
+        socket.reply(message, {
+          data: (message.params.cursor ? items.slice(0, 5) : items.slice(5))
+            .map((item) => ({ turnId: 'persisted-turn', item }))
+            .reverse(),
+          nextCursor: message.params.cursor ? null : 'older-persisted-items',
+        });
+        return true;
+      }
+      if (message.method !== 'thread/resume') return false;
+      socket.push({
+        id: message.id,
+        error: { code: -32600, message: 'thread thread-1 already has an active writer' },
+      });
+      return true;
+    },
+  });
+  f.state.thread.turns = [{ id: 'persisted-turn', status: 'completed', itemsView: 'full', items }];
+  await f.adapter.connect();
+  const snapshot = await f.adapter.subscribe('thread-1');
+  assert.equal(snapshot.readOnly, true);
+  assert.deepEqual(snapshot.pendingRequests, []);
+  assert.deepEqual(
+    snapshot.items.map((item) => item.id),
+    items.slice(5).map((item) => item.id),
+  );
+  assert.equal(snapshot.nextCursor, 'older-persisted-items');
+  items.push({ id: 'item-65', type: 'agentMessage', text: 'appended while reading older history' });
+  const older = await f.adapter.snapshot('thread-1', snapshot.nextCursor!);
+  assert.equal(older.readOnly, true);
+  assert.equal(older.nextCursor, null);
+  assert.deepEqual(
+    older.items.map((item) => item.id),
+    items.slice(0, 5).map((item) => item.id),
+  );
+  const refreshed = await f.adapter.subscribe('thread-1');
+  assert.equal(refreshed.readOnly, true);
+  assert.equal(refreshed.items.at(-1)?.id, 'item-65');
+  assert.equal(requests(f.socket, 'thread/resume').length, 1);
+  assert.equal(requests(f.socket, 'thread/items/list').length, 3);
+  assert.equal(requests(f.socket, 'thread/items/list')[1].params.cursor, 'older-persisted-items');
+  assert.ok(requests(f.socket, 'thread/read').every((message) => !message.params.includeTurns));
+});
+
+test('read-only threads reject sends, interrupts and approval responses until explicit retry succeeds', async (t) => {
+  let occupied = true;
+  const f = fixture(t, {
+    replayRequest: true,
+    handler(message, socket) {
+      if (message.method !== 'thread/resume' || !occupied) return false;
+      socket.push({
+        id: message.id,
+        error: { code: -32600, message: 'thread thread-1 already has an active writer' },
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  f.socket.push({
+    id: 77,
+    method: 'item/commandExecution/requestApproval',
+    params: { threadId: 'thread-1', command: 'echo approval' },
+  });
+  const requestId = pending(f.events).at(-1)!.request.id;
+  await f.adapter.subscribe('thread-1');
+  await assert.rejects(f.adapter.send({ threadId: 'thread-1', text: 'must not send' }), {
+    code: 'THREAD_READ_ONLY',
+  });
+  await assert.rejects(f.adapter.interrupt('thread-1', 'turn-1'), { code: 'THREAD_READ_ONLY' });
+  await assert.rejects(f.adapter.respond(requestId, { decision: 'accept' }), {
+    code: 'THREAD_READ_ONLY',
+  });
+  f.socket.push({
+    id: 78,
+    method: 'item/commandExecution/requestApproval',
+    params: { threadId: 'thread-1', command: 'echo later approval' },
+  });
+  assert.equal(pending(f.events).length, 1);
+  assert.equal(f.socket.sent.filter((message) => message.id === 77 || message.id === 78).length, 0);
+  assert.equal(requests(f.socket, 'thread/resume').length, 1);
+  for (const method of ['turn/start', 'turn/steer', 'turn/interrupt', 'thread/settings/update'])
+    assert.equal(requests(f.socket, method).length, 0);
+  const stillOccupied = await f.adapter.subscribe('thread-1', true);
+  assert.equal(stillOccupied.readOnly, true);
+  occupied = false;
+  assert.equal((await f.adapter.subscribe('thread-1')).readOnly, true);
+  assert.equal(requests(f.socket, 'thread/resume').length, 2);
+  const recovered = await f.adapter.subscribe('thread-1', true);
+  assert.equal(recovered.readOnly, undefined);
+  assert.equal(recovered.pendingRequests.length, 3);
+  assert.equal(requests(f.socket, 'thread/resume').length, 3);
+  await f.adapter.send({ threadId: 'thread-1', text: 'now writable' });
+  assert.equal(requests(f.socket, 'turn/start').length, 1);
+});
+
+test('an active writer reported by the compatibility resume retry still becomes read-only', async (t) => {
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/resume') return false;
+      socket.push({
+        id: message.id,
+        error: message.params.initialTurnsPage
+          ? { code: -32601, message: 'list_turns is not supported yet' }
+          : { code: -32600, message: 'thread thread-1 already has an active writer' },
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = await f.adapter.subscribe('thread-1');
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(snapshot.items.length, 2);
+  assert.equal(requests(f.socket, 'thread/resume').length, 2);
+  assert.equal((await f.adapter.subscribe('thread-1')).readOnly, true);
+  assert.equal(requests(f.socket, 'thread/resume').length, 2);
+});
+
+test('a send discovering an active writer never becomes a mutation', async (t) => {
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/resume') return false;
+      socket.push({
+        id: message.id,
+        error: { code: -32600, message: 'thread thread-1 already has an active writer' },
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  await assert.rejects(f.adapter.send({ threadId: 'thread-1', text: 'must not send' }), {
+    code: 'THREAD_READ_ONLY',
+  });
+  assert.equal(requests(f.socket, 'thread/resume').length, 1);
+  assert.equal(requests(f.socket, 'turn/start').length, 0);
+  assert.equal(requests(f.socket, 'turn/steer').length, 0);
+});
+
+test('only the exact thread-specific active-writer error enables read-only fallback', async (t) => {
+  for (const [code, message] of [
+    [-32600, 'thread thread-other already has an active writer'],
+    [-32600, 'permission denied: thread thread-1 already has an active writer'],
+    [-32600, 'thread thread-1 already has an active writer; unable to read'],
+    [-32600, 'no rollout found for thread id thread-1'],
+    [-32603, 'thread thread-1 already has an active writer'],
+  ]) {
+    const f = fixture(t, {
+      handler(request, socket) {
+        if (request.method !== 'thread/resume') return false;
+        socket.push({ id: request.id, error: { code, message } });
+        return true;
+      },
+    });
+    await f.adapter.connect();
+    await assert.rejects(f.adapter.subscribe('thread-1'), { message });
+    assert.equal(requests(f.socket, 'thread/resume').length, 1);
+    assert.equal(requests(f.socket, 'thread/read').length, 0);
+  }
+});
+
+test('read-only fallback propagates unreadable and incomplete history instead of inventing an empty thread', async (t) => {
+  let unreadable = true;
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method === 'thread/items/list' || message.method === 'thread/turns/list') {
+        socket.push({
+          id: message.id,
+          error: {
+            code: -32601,
+            message:
+              message.method === 'thread/items/list'
+                ? 'thread/items/list is not supported yet'
+                : 'list_turns is not supported yet',
+          },
+        });
+        return true;
+      }
+      if (message.method === 'thread/resume') {
+        socket.push({
+          id: message.id,
+          error: { code: -32600, message: 'thread thread-1 already has an active writer' },
+        });
+        return true;
+      }
+      if (message.method === 'thread/read' && unreadable) {
+        socket.push({ id: message.id, error: { code: -32600, message: 'permission denied' } });
+        return true;
+      }
+      return false;
+    },
+  });
+  await f.adapter.connect();
+  await assert.rejects(f.adapter.subscribe('thread-1'), /permission denied/);
+  unreadable = false;
+  f.state.thread.turns = [{ id: 'turn-1', status: 'completed', itemsView: 'summary' }];
+  await assert.rejects(f.adapter.subscribe('thread-1'), { code: 'INCOMPLETE_HISTORY' });
+  f.state.thread.turns = [];
+  assert.equal((await f.adapter.subscribe('thread-1')).readOnly, true);
+  assert.equal(requests(f.socket, 'thread/resume').length, 1);
+});
+
+test('read-only state survives reconnect without attempting to acquire another writer', async (t) => {
+  const f = fixture(t, {
+    reconnect: 5,
+    handler(message, socket) {
+      if (message.method !== 'thread/resume') return false;
+      socket.push({
+        id: message.id,
+        error: { code: -32600, message: 'thread thread-1 already has an active writer' },
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  await f.adapter.subscribe('thread-1');
+  f.socket.terminate();
+  for (let i = 0; i < 50 && (f.sockets.length < 2 || !f.adapter.connection.connected); i++)
+    await delay(5);
+  assert.equal(f.sockets.length, 2);
+  assert.equal(f.adapter.connection.connected, true);
+  const snapshot = await f.adapter.subscribe('thread-1');
+  assert.equal(snapshot.readOnly, true);
+  assert.equal(f.sockets.flatMap((socket) => requests(socket, 'thread/resume')).length, 1);
+  assert.ok(requests(f.socket, 'thread/read').length > 0);
+});
+
 test('explicit unsupported item pagination falls back to full turn pages with independent cursors', async (t) => {
   const f = fixture(t, {
     handler(message, socket) {

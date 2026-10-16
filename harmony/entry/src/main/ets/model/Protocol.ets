@@ -84,6 +84,7 @@ export interface ThreadSnapshot {
   pendingRequests: PendingRequest[];
   settings?: SessionSettings;
   warning?: string;
+  readOnly?: boolean;
   eventCursor?: SnapshotCursor;
 }
 

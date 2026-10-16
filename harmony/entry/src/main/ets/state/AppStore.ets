@@ -13,6 +13,7 @@ import { ServerProfile, SessionVault } from '../transport/SessionVault';
 import { parseConnectionInput, safeImagePath } from '../transport/Endpoint';
 
 interface ThreadCommand { threadId: string }
+interface SubscribeCommand extends ThreadCommand { retryWrite?: boolean }
 interface CreateCommand extends SessionSettings { projectId: string }
 interface SendCommand extends SessionSettings {
   threadId: string;
@@ -97,6 +98,7 @@ export class AppStore {
   olderBusy: boolean = false;
   sending: boolean = false;
   uploading: boolean = false;
+  retryingWrite: boolean = false;
   screen: string = 'servers';
   mode: string = 'workspaces';
   workspace: string | null = null;
@@ -120,6 +122,7 @@ export class AppStore {
   imageVersion: number = 0;
   onTimelineChanged: () => void = () => {};
   private selectionVersion: number = 0;
+  private snapshotVersion: number = 0;
   private overviewTimer: number = -1;
   private overviewTask: Promise<void> | undefined = undefined;
   private catalogVersion: number = 0;
@@ -157,6 +160,7 @@ export class AppStore {
   };
 
   get ready(): boolean { return this.live && this.boot?.connection.connected === true; }
+  get readOnly(): boolean { return this.snapshot?.readOnly === true; }
   get hasSavedConnection(): boolean { return !!this.api?.cookie; }
   get projects(): Project[] { return this.boot?.projects || []; }
   get contextTitle(): string {
@@ -679,6 +683,7 @@ export class AppStore {
     if (this.selected) this.attachmentDrafts.set(this.draftKey(this.selected), this.attachments);
     this.selected = id;
     this.snapshot = undefined;
+    this.retryingWrite = false;
     this.loading = true;
     this.screen = 'chat';
     this.error = '';
@@ -705,23 +710,26 @@ export class AppStore {
     finally { if (selection === this.selectionVersion && revision === this.authVersion) this.loading = false; }
   }
   backToThreads(): void { this.screen = 'threads'; }
-  private async syncSnapshot(cursor?: string): Promise<void> {
+  private async syncSnapshot(cursor?: string, retryWrite: boolean = false): Promise<void> {
     const id = this.selected;
     if (!id || !this.client) return;
+    if (!cursor && this.retryingWrite && !retryWrite) return;
     const revision = this.authVersion;
     const selection = this.selectionVersion;
-    const incoming = cursor ? await this.api!.snapshot(id, cursor) : await this.subscribeSnapshot(id, revision, selection);
+    const version = cursor ? this.snapshotVersion : ++this.snapshotVersion;
+    const incoming = cursor ? await this.api!.snapshot(id, cursor) : await this.subscribeSnapshot(id, revision, selection, retryWrite);
     if (!incoming) return;
     if (this.selected !== id || revision !== this.authVersion || selection !== this.selectionVersion) return;
+    if (!cursor && version !== this.snapshotVersion) return;
     this.snapshot = this.tracker.reconcile(this.snapshot, incoming, cursor !== undefined);
     if (!cursor) this.onTimelineChanged();
     void this.cacheImages();
   }
 
-  private async subscribeSnapshot(id: string, revision: number, selection: number): Promise<ThreadSnapshot | undefined> {
+  private async subscribeSnapshot(id: string, revision: number, selection: number, retryWrite: boolean = false): Promise<ThreadSnapshot | undefined> {
     const client = this.client;
     if (!client) return undefined;
-    const params: ThreadCommand = { threadId: id };
+    const params: SubscribeCommand = retryWrite ? { threadId: id, retryWrite: true } : { threadId: id };
     for (let attempt = 0; attempt < 3; attempt++) {
       if (revision !== this.authVersion || selection !== this.selectionVersion || id !== this.selected || client !== this.client) return undefined;
       try {
@@ -732,12 +740,22 @@ export class AppStore {
         // A fresh Codex rollout can exist before its first metadata record is
         // flushed. Retry this read only; never replay a turn/send operation.
         const freshRollout = /^failed to read thread: thread-store internal error: failed to read session metadata [^\r\n]+: rollout at [^\r\n]+ is empty$/.test(error.message);
-        if (!freshRollout) throw error;
+        if (!freshRollout || retryWrite) throw error;
         if (attempt === 2) throw new Error('会话历史暂未准备好，请稍后重新同步。');
         await new Promise<void>((resolve) => { setTimeout(() => resolve(), (attempt + 1) * 500); });
       }
     }
     return undefined;
+  }
+  async tryResumeEditing(): Promise<void> {
+    if (!this.readOnly || !this.ready || !this.client || this.retryingWrite) return;
+    const revision = this.authVersion;
+    const selection = this.selectionVersion;
+    this.retryingWrite = true;
+    this.error = '';
+    try { await this.syncSnapshot(undefined, true); }
+    catch (caught) { if (revision === this.authVersion && selection === this.selectionVersion) await this.fail(caught as Error); }
+    finally { if (revision === this.authVersion && selection === this.selectionVersion) this.retryingWrite = false; }
   }
   async loadOlder(): Promise<void> {
     const cursor = this.snapshot?.nextCursor;
@@ -750,6 +768,7 @@ export class AppStore {
   }
 
   setDraft(value: string): void {
+    if (this.readOnly) return;
     this.draft = value;
     clearTimeout(this.draftTimer);
     this.draftTimer = setTimeout(() => { void this.flushDraft(); }, 400);
@@ -769,12 +788,15 @@ export class AppStore {
   }
 
   setModel(value: string): void {
+    if (this.readOnly) return;
     this.settings = { model: value || undefined, effort: undefined, mode: this.settings.mode };
   }
   setEffort(value: string): void {
+    if (this.readOnly) return;
     this.settings = { model: this.settings.model, effort: value || undefined, mode: this.settings.mode };
   }
   setSessionMode(value: string): void {
+    if (this.readOnly) return;
     this.settings = { model: this.settings.model, effort: this.settings.effort, mode: value === 'plan' ? 'plan' : 'default' };
   }
 
@@ -807,7 +829,7 @@ export class AppStore {
 
   async send(): Promise<void> {
     const current = this.snapshot;
-    if (!current || !this.client || !this.ready || this.sending || this.uploading) return;
+    if (!current || current.readOnly || !this.client || !this.ready || this.sending || this.uploading || this.retryingWrite) return;
     if (!this.draft.trim() && this.attachments.length === 0) return;
     const id = current.thread.id;
     const revision = this.authVersion;
@@ -862,7 +884,7 @@ export class AppStore {
   async interrupt(): Promise<void> {
     const thread = this.snapshot?.thread;
     const client = this.client;
-    if (!thread?.activeTurnId || !client || !this.ready || this.busy) return;
+    if (this.readOnly || !thread?.activeTurnId || !client || !this.ready || this.busy || this.retryingWrite) return;
     const revision = this.authVersion;
     this.busy = true;
     try {
@@ -875,7 +897,7 @@ export class AppStore {
 
   async answerRequest(id: string, decision: string, answers: QuestionAnswer[]): Promise<void> {
     const client = this.client;
-    if (!client || !this.ready || this.busy) return;
+    if (this.readOnly || !client || !this.ready || this.busy || this.retryingWrite) return;
     const revision = this.authVersion;
     const threadId = this.selected;
     this.busy = true;
@@ -893,7 +915,7 @@ export class AppStore {
     const api = this.api;
     const id = this.selected;
     const revision = this.authVersion;
-    if (!api || !id || this.uploading || !this.ready) return;
+    if (this.readOnly || !api || !id || this.uploading || !this.ready || this.retryingWrite) return;
     if (this.attachments.length >= 8) { this.error = '每条消息最多添加 8 张图片。'; return; }
     this.uploading = true;
     try {
@@ -901,7 +923,7 @@ export class AppStore {
       const selection = await picker.select({ MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: 8 - this.attachments.length });
       let attachments = this.attachments.slice();
       for (const uri of selection.photoUris) {
-        if (this.selected !== id || revision !== this.authVersion) break;
+        if (this.readOnly || this.selected !== id || revision !== this.authVersion) break;
         const file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
         let bytes = new ArrayBuffer(0);
         try {
@@ -919,8 +941,9 @@ export class AppStore {
           try { bytes = await packer.packToData(source, { format: 'image/jpeg', quality: 90 }); mime = 'image/jpeg'; }
           finally { await packer.release(); await source.release(); }
         }
+        if (this.readOnly || this.selected !== id || revision !== this.authVersion) break;
         const uploaded = await api.upload(bytes, mime);
-        if (this.selected !== id || revision !== this.authVersion) break;
+        if (this.readOnly || this.selected !== id || revision !== this.authVersion) break;
         const attachment: Attachment = { id: uploaded.id, url: uploaded.url, name: `图片 ${attachments.length + 1}`, localUri: uri };
         attachments = [...attachments, attachment];
         this.attachments = attachments;
@@ -928,7 +951,9 @@ export class AppStore {
     } catch (caught) { if (revision === this.authVersion) await this.fail(caught as Error); }
     finally { if (revision === this.authVersion) this.uploading = false; }
   }
-  removeAttachment(id: string): void { this.attachments = this.attachments.filter((item: Attachment) => item.id !== id); }
+  removeAttachment(id: string): void {
+    if (!this.readOnly) this.attachments = this.attachments.filter((item: Attachment) => item.id !== id);
+  }
   imageUrl(path: string): string { return this.imageCache.get(this.draftKey(path)) || ''; }
   imageHeaders(): Record<string, string> { return {}; }
   private async cacheImages(): Promise<void> {
@@ -1060,6 +1085,7 @@ export class AppStore {
     this.olderBusy = false;
     this.sending = false;
     this.uploading = false;
+    this.retryingWrite = false;
     this.refreshTask = undefined;
     this.refreshAgain = false;
     this.tracker.reset();

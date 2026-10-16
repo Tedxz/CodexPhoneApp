@@ -96,6 +96,7 @@ export class CodexAdapter extends EventEmitter {
   private approvals = new Map<string, Approval>();
   private watched = new Set<string>();
   private resumed = new Set<string>();
+  private readOnly = new Set<string>();
   private resuming = new Map<string, Promise<ThreadSnapshot>>();
   private threads = new Map<string, ThreadSummary>();
   private settings = new Map<string, SessionSettings>();
@@ -236,7 +237,7 @@ export class CodexAdapter extends EventEmitter {
       for (const id of this.watched) {
         if (this.stopped || generation !== this.generation) break;
         try {
-          await this.resume(id);
+          await this.subscribe(id);
         } catch {
           /* A deleted/unavailable thread is reported by its next snapshot request. */
         }
@@ -727,9 +728,12 @@ export class CodexAdapter extends EventEmitter {
           ids.add(item.id);
         }
     }
-    const pendingRequests = [...this.approvals.values()]
-      .filter((a) => a.request.threadId === threadId)
-      .map((a) => a.request);
+    const readOnly = this.readOnly.has(threadId);
+    const pendingRequests = readOnly
+      ? []
+      : [...this.approvals.values()]
+          .filter((a) => a.request.threadId === threadId)
+          .map((a) => a.request);
     const waiting = this.activeFlags.get(threadId)?.length;
     return {
       thread: this.threads.get(threadId)!,
@@ -738,7 +742,8 @@ export class CodexAdapter extends EventEmitter {
         typeof record(page).nextCursor === 'string' ? (record(page).nextCursor as string) : null,
       pendingRequests,
       settings: this.settings.get(threadId),
-      ...(waiting && !pendingRequests.length
+      ...(readOnly ? { readOnly: true } : {}),
+      ...(!readOnly && waiting && !pendingRequests.length
         ? {
             warning:
               '电脑会话正在等待审批或用户回答，但共享后端尚未向此连接转发请求。请在电脑端处理；网关不会推测或自动批准。',
@@ -792,6 +797,20 @@ export class CodexAdapter extends EventEmitter {
       error.code === 'CODEX_-32601' &&
       error.message === 'list_turns is not supported yet'
     );
+  }
+  private isActiveWriter(threadId: string, error: unknown): boolean {
+    return (
+      error instanceof CodexError &&
+      error.code === 'CODEX_-32600' &&
+      error.message === `thread ${threadId} already has an active writer`
+    );
+  }
+  private assertWritable(threadId: string): void {
+    if (this.readOnly.has(threadId))
+      throw new CodexError(
+        'THREAD_READ_ONLY',
+        '此会话正在被其他 Codex 实例占用，当前为只读。请在原实例操作，或释放会话后重试连接。',
+      );
   }
   private fullTurns(raw: unknown): ObjectValue[] {
     const thread = record(raw);
@@ -913,8 +932,9 @@ export class CodexAdapter extends EventEmitter {
           : null,
     };
   }
-  async subscribe(threadId: string): Promise<ThreadSnapshot> {
+  async subscribe(threadId: string, retryWrite = false): Promise<ThreadSnapshot> {
     this.watched.add(threadId);
+    if (this.readOnly.has(threadId) && !retryWrite) return this.snapshot(threadId);
     return this.resumed.has(threadId) ? this.snapshot(threadId) : this.resume(threadId);
   }
   private resume(threadId: string): Promise<ThreadSnapshot> {
@@ -930,15 +950,22 @@ export class CodexAdapter extends EventEmitter {
             threadId,
             excludeTurns: true,
             initialTurnsPage: { limit: 1, sortDirection: 'desc', itemsView: 'summary' },
+          }).catch((error: unknown) => {
+            if (!this.isUnmaterialized(threadId, error) && !this.isTurnListUnavailable(error))
+              throw error;
+            // Joining an empty live thread is valid; requesting an initial
+            // history page is not. Retry only that passive join.
+            return this.rpc('thread/resume', { threadId, excludeTurns: true });
           }),
         );
       } catch (error) {
-        if (!this.isUnmaterialized(threadId, error) && !this.isTurnListUnavailable(error))
-          throw error;
-        // Joining an empty live thread is valid; requesting an initial history
-        // page is not. Retry only the passive join, with no settings overrides.
-        r = record(await this.rpc('thread/resume', { threadId, excludeTurns: true }));
+        if (!this.isActiveWriter(threadId, error)) throw error;
+        // Observing persisted history does not need the other process's writer.
+        // Keep this restriction across reconnects until an explicit retry.
+        this.readOnly.add(threadId);
+        return this.snapshot(threadId);
       }
+      this.readOnly.delete(threadId);
       const thread = this.remember(r.thread, revision);
       this.rememberSettings(threadId, r);
       const active = array(record(r.initialTurnsPage).data)
@@ -1016,9 +1043,11 @@ export class CodexAdapter extends EventEmitter {
     return this.snapshot(thread.id);
   }
   async send(input: SendInput, assertAuthorized?: () => void): Promise<unknown> {
+    this.assertWritable(input.threadId);
     if (!input.text.trim() && !input.imagePaths?.length)
       throw new CodexError('INVALID_INPUT', '请输入消息或选择图片');
     if (!this.resumed.has(input.threadId)) await this.subscribe(input.threadId);
+    this.assertWritable(input.threadId);
     const revision = this.revision;
     const r = record(
       await this.rpc('thread/read', { threadId: input.threadId, includeTurns: false }),
@@ -1043,11 +1072,13 @@ export class CodexAdapter extends EventEmitter {
             '运行中的任务只能追加指令，模型、推理强度与模式请在任务结束后调整',
           );
       assertAuthorized?.();
+      this.assertWritable(input.threadId);
       const result = record(await this.rpc('turn/steer', { ...params, expectedTurnId }, true));
       return { turnId: str(result.turnId, expectedTurnId) };
     }
     const overrides = await this.settingOverrides(input.threadId, input);
     assertAuthorized?.();
+    this.assertWritable(input.threadId);
     const result = await this.rpc('turn/start', { ...params, ...overrides }, true);
     this.settings.set(input.threadId, {
       ...this.settings.get(input.threadId),
@@ -1059,6 +1090,7 @@ export class CodexAdapter extends EventEmitter {
     return { turnId: str(turn.id), status: str(turn.status) };
   }
   async interrupt(threadId: string, turnId: string): Promise<unknown> {
+    this.assertWritable(threadId);
     return this.rpc('turn/interrupt', { threadId, turnId }, true);
   }
   async models(): Promise<ModelOption[]> {
@@ -1243,13 +1275,16 @@ export class CodexAdapter extends EventEmitter {
       method,
       responding: false,
     });
-    this.event({ type: 'request.pending', request });
+    // Resume can replay approvals before its response promise settles. Retain
+    // them for a successful explicit retry, but never expose read-only controls.
+    if (!this.readOnly.has(threadId)) this.event({ type: 'request.pending', request });
   }
   async respond(requestId: string, answer: RequestAnswer): Promise<unknown> {
     const approval = this.approvals.get(requestId);
     if (!approval || approval.generation !== this.generation || approval.responding)
       throw new CodexError('REQUEST_EXPIRED', '该请求已过期或已在另一端处理，请刷新会话');
     const { request, params } = approval;
+    this.assertWritable(request.threadId);
     let result: ObjectValue;
     if (request.kind === 'userInput') {
       const answers: Record<string, { answers: string[] }> = {};

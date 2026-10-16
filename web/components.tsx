@@ -24,7 +24,7 @@ export function Icon({
     stop: 'M6 6h12v12H6z',
     close: 'm6 6 12 12M6 18 18 6',
     refresh: 'M20 8a8 8 0 1 0 0 8M20 3v5h-5',
-    send: 'm5 12 7-7 7 7M12 5v15',
+    send: 'm21 3-6.5 18-4-7.5L3 9.5 21 3ZM10.5 13.5 21 3',
   };
   return (
     <svg
@@ -160,7 +160,7 @@ export function ModelControls({
           value={value.effort || ''}
           onChange={(e) => onChange({ ...value, effort: e.target.value || undefined })}
         >
-          <option value="">默认</option>
+          <option value="">default</option>
           {value.effort && !model?.efforts.includes(value.effort) && (
             <option value={value.effort}>{value.effort}</option>
           )}

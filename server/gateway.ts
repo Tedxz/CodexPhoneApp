@@ -493,8 +493,15 @@ export function createGateway(
       requireBackend(target);
     };
     const codex = target.codex;
-    if (method === 'thread.subscribe')
-      return snapshotForBrowser(await codex.subscribe(text(p.threadId, '会话 ID')), target, false);
+    if (method === 'thread.subscribe') {
+      if (p.retryWrite !== undefined && typeof p.retryWrite !== 'boolean')
+        throw new HttpError(400, 'retryWrite 必须为布尔值');
+      return snapshotForBrowser(
+        await codex.subscribe(text(p.threadId, '会话 ID'), p.retryWrite === true),
+        target,
+        false,
+      );
+    }
     if (method === 'thread.create') {
       const project = target.projects.find((x) => x.id === p.projectId);
       if (!project) throw new HttpError(400, '请选择已配置的项目');

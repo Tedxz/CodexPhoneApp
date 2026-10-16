@@ -17,6 +17,8 @@ class FakeCodex extends EventEmitter {
   connection = { connected: true, message: 'Connected', sharedBackend: true };
   capabilities = { images: true, planMode: true, liveControl: true };
   calls = 0;
+  subscriptions: { id: string; retryWrite: boolean }[] = [];
+  readOnly = false;
   listOptions?: { cursor?: string; search?: string; cwd?: string };
   close() {}
   async listThreads(options: { cursor?: string; search?: string; cwd?: string }) {
@@ -36,9 +38,11 @@ class FakeCodex extends EventEmitter {
     await delay(10);
     return { turn: { id: 'turn-1' } };
   }
-  async subscribe(id: string) {
+  async subscribe(id: string, retryWrite = false) {
+    this.subscriptions.push({ id, retryWrite });
     return {
       thread: { id, title: 'test', cwd: '/project', preview: '', status: 'idle', updatedAt: 0 },
+      ...(this.readOnly ? { readOnly: true } : {}),
       items: [],
       pendingRequests: [],
       nextCursor: null,
@@ -246,6 +250,37 @@ function connectBrowser(
   assert.equal(ws.sent[0]?.event.type, 'connection');
   return ws;
 }
+
+test('read-only snapshots reach clients and write-access retry requires an explicit boolean', async () => {
+  const f = await fixture();
+  try {
+    const paired = f.gateway.auth.pair(f.gateway.auth.createPairing().token, 'Phone')!;
+    const ws = connectBrowser(f, 'codex_phone=' + paired.token);
+    f.codex.readOnly = true;
+    const command = async (id: string, params: Record<string, unknown>) => {
+      ws.emit('message', Buffer.from(JSON.stringify({ id, method: 'thread.subscribe', params })));
+      await delay(5);
+      return ws.sent.find((reply) => reply.id === id)!;
+    };
+    const first = await command('first-read', { threadId: 'busy-thread' });
+    assert.equal(first.result.readOnly, true);
+    assert.ok(first.result.eventCursor);
+    assert.deepEqual(f.codex.subscriptions, [{ id: 'busy-thread', retryWrite: false }]);
+    const bad = await command('invalid-retry', { threadId: 'busy-thread', retryWrite: 'true' });
+    assert.ok(bad.error);
+    assert.equal(f.codex.subscriptions.length, 1);
+    f.codex.readOnly = false;
+    const recovered = await command('explicit-retry', {
+      threadId: 'busy-thread',
+      retryWrite: true,
+    });
+    assert.equal(recovered.result.readOnly, undefined);
+    assert.deepEqual(f.codex.subscriptions[1], { id: 'busy-thread', retryWrite: true });
+    ws.close();
+  } finally {
+    await f.cleanup();
+  }
+});
 
 test('identify requires cookie, trusted origin and CSRF; migration preserves cookies and exposes only public client data', async () => {
   const f = await fixture();

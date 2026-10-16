@@ -79,6 +79,19 @@ test('pagination preserves current off-page items without double-appending their
   assert.equal(result.nextCursor, 'more');
 });
 
+test('history pagination preserves access while a fresh subscription can restore editing', () => {
+  const tracker = new SnapshotTracker();
+  const current = { ...snapshot(), readOnly: true };
+  const older = snapshot();
+  older.items = [{ id: 'old', turnId: 'older', type: 'userMessage', text: 'old' }];
+  assert.equal(tracker.reconcile(current, older, true).readOnly, true);
+  const writable = tracker.reconcile(current, snapshot());
+  assert.equal(writable.readOnly, undefined);
+  // An in-flight older page must not undo the explicit successful retry either.
+  assert.equal(tracker.reconcile(writable, { ...older, readOnly: true }, true).readOnly, undefined);
+  assert.equal(tracker.reconcile(writable, current).readOnly, true);
+});
+
 test('later approvals, resolutions and turn updates override snapshot state exactly once', () => {
   const tracker = new SnapshotTracker();
   const incoming = snapshot();

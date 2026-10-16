@@ -3,7 +3,7 @@ import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { WorkspaceSection, workspaceBottomRoot, workspacePathLabel, workspaceSections } from '../model/Workspaces';
 import { AppStore, ServerEntry } from '../state/AppStore';
-import { Attachment, ConversationItem, Device, PendingRequest, Project, QuestionAnswer, ThreadSummary,
+import { Attachment, ConversationItem, Device, ModelOption, PendingRequest, Project, QuestionAnswer, ThreadSummary,
   WorkspaceSummary } from '../model/Protocol';
 import { ServerCard } from '../components/ServerCard';
 import { MessageCard } from '../components/MessageCard';
@@ -21,7 +21,7 @@ struct Index {
   @State removeServerId: string = '';
   @State expandedTools: string[] = [];
   private timeline: Scroller = new Scroller();
-  private followLatest: boolean = true;
+  @State followLatest: boolean = true;
   private timelineTimer: number = -1;
 
   aboutToAppear(): void {
@@ -147,6 +147,15 @@ struct Index {
   private jumpToLatest(): void {
     this.followLatest = true;
     this.timeline.scrollEdge(Edge.Bottom);
+  }
+
+  private composerModel(): string {
+    const id = this.store.settings.model || this.store.snapshot?.thread.model || '';
+    return this.store.models.find((model: ModelOption) => model.id === id)?.label || id || '沿用电脑';
+  }
+
+  private composerEffort(): string {
+    return this.store.settings.effort || 'default';
   }
 
   @Builder
@@ -643,7 +652,7 @@ struct Index {
     Column({ space: 10 }) {
       if (this.controlsOpen) {
         SettingsControls({ models: this.store.models, settings: this.store.settings,
-          disabled: !this.store.ready || this.store.sending || this.store.snapshot?.thread.status === 'active',
+          disabled: this.store.readOnly || !this.store.ready || this.store.sending || this.store.snapshot?.thread.status === 'active',
           planAvailable: !!this.store.boot?.capabilities.planMode,
           onModel: (value: string) => this.store.setModel(value),
           onEffort: (value: string) => this.store.setEffort(value),
@@ -658,139 +667,194 @@ struct Index {
                   .width(64).height(64).objectFit(ImageFit.Cover).borderRadius(10)
                 Button('移除')
                   .fontSize(11).fontColor(GREEN).backgroundColor(PALE_GREEN).height(28)
-                  .enabled(!this.store.sending && !this.store.uploading)
+                  .enabled(!this.store.readOnly && !this.store.sending && !this.store.uploading)
                   .onClick(() => this.store.removeAttachment(attachment.id))
               }
             }, (attachment: Attachment) => attachment.id)
           }
         }.scrollable(ScrollDirection.Horizontal).width('100%')
       }
-      TextArea({ text: this.store.draft,
-        placeholder: this.store.snapshot?.thread.status === 'active' ? '补充要求，继续当前任务…' : '描述任务，或附上一张截图…' })
-        .id('message-draft')
-        .height(88)
-        .fontSize(15)
-        .fontColor(INK)
-        .backgroundColor(CARD_BACKGROUND)
-        .border({ width: 1, color: BORDER })
-        .borderRadius(16)
-        .onChange((value: string) => this.store.setDraft(value))
-      Row({ space: 8 }) {
-        Button(this.store.uploading ? '上传中' : '＋ 图片')
+      Column({ space: 0 }) {
+        TextArea({ text: this.store.draft,
+          placeholder: this.store.readOnly ? '只读会话，已有草稿会保留' : (this.store.snapshot?.thread.status === 'active' ? '补充要求，继续当前任务…' : '描述任务，或附上一张截图…') })
+          .id('message-draft')
+          .height(76)
+          .padding({ left: 12, right: 12, top: 12, bottom: 8 })
+          .fontSize(15)
+          .fontColor(INK)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(0)
+          .enabled(!this.store.readOnly)
+          .onChange((value: string) => this.store.setDraft(value))
+        Row({ space: 6 }) {
+          Button({ type: ButtonType.Normal }) {
+            if (this.store.uploading) {
+              LoadingProgress().width(20).height(20).color(GREEN)
+            } else {
+              Image($r('app.media.composer_image')).width(20).height(20).accessibilityLevel('no')
+            }
+          }
           .id('pick-images')
-          .height(44).fontSize(12).fontColor(GREEN).backgroundColor(PALE_GREEN)
-          .enabled(this.store.ready && !this.store.uploading && !this.store.sending && !!this.store.boot?.capabilities.images)
+          .width(36).height(40).padding(0).borderRadius(10).backgroundColor(Color.Transparent)
+          .accessibilityText(this.store.uploading ? '正在上传图片' : '添加图片')
+          .enabled(!this.store.readOnly && this.store.ready && !this.store.uploading && !this.store.sending && !!this.store.boot?.capabilities.images)
           .onClick(() => this.store.pickImages())
-        Button(this.controlsOpen ? '收起设置' : (this.store.settings.mode === 'plan' ? 'Plan ▴' : '模型 ▴'))
+          Button({ type: ButtonType.Normal }) {
+            Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
+              Text(this.composerModel()).fontSize(12).fontWeight(FontWeight.Medium).fontColor(GREEN)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).flexShrink(1)
+              Text('·').fontSize(11).fontColor(MUTED).flexShrink(0).margin({ left: 4 })
+              Text(this.composerEffort()).fontSize(11).fontColor(MUTED).maxLines(1)
+                .flexShrink(0).margin({ left: 4 })
+              if (this.store.settings.mode === 'plan') {
+                Text('Plan').fontSize(10).fontColor(GREEN).padding({ left: 4, right: 4, top: 2, bottom: 2 })
+                  .backgroundColor(PALE_GREEN).borderRadius(4).flexShrink(0).margin({ left: 4 })
+              }
+              Image($r('app.media.composer_chevron')).width(12).height(12)
+                .flexShrink(0).margin({ left: 4 })
+                .rotate({ angle: this.controlsOpen ? 0 : 180 }).accessibilityLevel('no')
+            }.width('100%')
+          }
           .id('toggle-model-controls')
-          .height(44).fontSize(12).fontColor(GREEN).backgroundColor(Color.Transparent)
+          .layoutWeight(1).height(40).padding({ left: 4, right: 4 }).borderRadius(10)
+          .backgroundColor(Color.Transparent)
+          .accessibilityText(`模型：${this.composerModel()}，思考强度：${this.composerEffort()}${this.store.settings.mode === 'plan' ? '，规划模式' : ''}，${this.controlsOpen ? '收起设置' : '展开设置'}`)
+          .enabled(!this.store.readOnly)
           .onClick(() => this.controlsOpen = !this.controlsOpen)
-        Blank()
-        Button('↓')
-          .padding(0)
-          .height(44).width(36).fontSize(20).fontColor(GREEN).backgroundColor(Color.Transparent)
-          .accessibilityText('跳到最新消息')
-          .onClick(() => this.jumpToLatest())
-        if (this.store.snapshot?.thread.status === 'active') {
-          Button('■')
+          if (this.store.snapshot?.thread.status === 'active') {
+            Button({ type: ButtonType.Normal }) {
+              Image($r('app.media.composer_stop')).width(20).height(20).accessibilityLevel('no')
+            }
             .id('interrupt-turn')
-            .padding(0)
-            .height(44).width(44).fontSize(17).fontColor(ERROR).backgroundColor('#F9EDE7')
-            .enabled(this.store.ready && !this.store.sending)
+            .padding(0).height(40).width(36).borderRadius(10).backgroundColor('#F9EDE7')
+            .enabled(!this.store.readOnly && this.store.ready && !this.store.sending)
             .accessibilityText('停止当前任务')
             .onClick(() => this.store.interrupt())
-        }
-        Button(this.store.sending ? '…' : '↑')
+          }
+          Button({ type: ButtonType.Circle }) {
+            if (this.store.sending) {
+              LoadingProgress().width(20).height(20).color(Color.White)
+            } else {
+              Image($r('app.media.composer_send')).width(21).height(21).accessibilityLevel('no')
+            }
+          }
           .id('send-message')
-          .padding(0)
-          .height(44).width(44).fontSize(24).backgroundColor(GREEN)
-          .enabled(this.store.ready && !this.store.sending && !this.store.uploading &&
+          .padding(0).height(40).width(40).backgroundColor(GREEN)
+          .enabled(!this.store.readOnly && this.store.ready && !this.store.sending && !this.store.uploading &&
             this.store.snapshot?.thread.canAcceptDirectInput !== false &&
             (!!this.store.draft.trim() || this.store.attachments.length > 0))
           .accessibilityText(this.store.snapshot?.thread.status === 'active' ? '补充当前任务' : '发送消息')
           .onClick(() => this.store.send())
+        }
+        .width('100%').padding({ left: 4, right: 6, bottom: 6 })
       }
-      .width('100%')
-      if (this.store.snapshot?.thread.canAcceptDirectInput === false) {
+      .width('100%').backgroundColor(CARD_BACKGROUND).border({ width: 1, color: BORDER }).borderRadius(18)
+      if (!this.store.readOnly && this.store.snapshot?.thread.canAcceptDirectInput === false) {
         Text('此会话暂不接受远程输入，请在电脑处理。')
           .fontSize(11).fontColor(MUTED).width('100%')
       }
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+    .padding({ left: 16, right: 16, top: 6, bottom: 10 })
     .backgroundColor(PAGE_BACKGROUND)
   }
 
   @Builder
   chatPage() {
     this.pageHeader(this.store.snapshot?.thread.title || '正在打开会话…', this.store.snapshot?.thread.cwd || '')
+    if (this.store.readOnly) {
+      Column({ space: 4 }) {
+        Row({ space: 8 }) {
+          Text('只读会话').fontSize(13).fontWeight(FontWeight.Medium).fontColor(GREEN).layoutWeight(1)
+          Button(this.store.retryingWrite ? '正在尝试…' : '尝试恢复编辑')
+            .id('retry-thread-write')
+            .height(32).fontSize(12).fontColor(GREEN).backgroundColor(Color.Transparent)
+            .enabled(this.store.ready && !this.store.retryingWrite)
+            .onClick(() => this.store.tryResumeEditing())
+        }.width('100%')
+        Text('其他客户端正在使用此会话。可以查看历史，刷新可获取最新内容；草稿和图片会保留。')
+          .fontSize(12).lineHeight(18).fontColor(MUTED).width('100%')
+      }.width('100%').padding({ left: 20, right: 20, top: 4, bottom: 10 }).backgroundColor(PALE_GREEN)
+    }
     if (this.store.loading) {
       Column({ space: 12 }) {
         LoadingProgress().width(36).height(36).color(GREEN)
         Text('正在同步会话…').fontSize(14).fontColor(MUTED)
       }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
     } else {
-      List({ space: 14, scroller: this.timeline }) {
-        if (this.store.snapshot?.nextCursor) {
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        List({ space: 14, scroller: this.timeline }) {
+          if (this.store.snapshot?.nextCursor) {
+            ListItem() {
+              Button(this.store.olderBusy ? '正在加载…' : '查看更早的消息')
+                .height(44).width('100%').fontSize(13).fontColor(GREEN).backgroundColor(PALE_GREEN)
+                .enabled(!this.store.olderBusy).onClick(() => this.store.loadOlder())
+            }
+          }
+          ForEach(this.store.snapshot?.items || [], (item: ConversationItem) => {
+            ListItem() {
+              MessageCard({ item: item, imageSource: (path: string): string => this.store.imageUrl(path),
+                expanded: this.expandedTools.includes(item.id), onToggle: (id: string) => this.toggleTool(id) })
+            }
+          }, (item: ConversationItem) => `${JSON.stringify(item)}:${item.images?.length ? this.store.imageVersion : 0}`)
+          if (!this.store.snapshot?.items.length) {
+            ListItem() {
+              Column({ space: 10 }) {
+                Text('一切从你的想法开始').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
+                Text('描述任务，或附上一张截图。').fontSize(14).fontColor(MUTED)
+              }.width('100%').padding({ top: 80, bottom: 80 })
+            }
+          }
+          if (this.store.snapshot?.warning) {
+            ListItem() {
+              Text(this.store.snapshot?.warning || '').fontSize(12).lineHeight(20).fontColor(MUTED).padding(12)
+            }
+          }
+          ForEach(this.store.snapshot?.pendingRequests || [], (request: PendingRequest) => {
+            ListItem() {
+              RequestCard({ request: request, connected: this.store.ready && !this.store.readOnly, busy: this.store.busy,
+                onAnswer: (id: string, decision: string, answers: QuestionAnswer[]) => {
+                  this.store.answerRequest(id, decision, answers);
+                } }).enabled(!this.store.readOnly)
+            }
+          }, (request: PendingRequest) => request.id)
           ListItem() {
-            Button(this.store.olderBusy ? '正在加载…' : '查看更早的消息')
-              .height(44).width('100%').fontSize(13).fontColor(GREEN).backgroundColor(PALE_GREEN)
-              .enabled(!this.store.olderBusy).onClick(() => this.store.loadOlder())
+            Row({ space: 6 }) {
+              Text(this.store.snapshot?.thread.status === 'active' ? '●' : '·').fontSize(10).fontColor(GREEN)
+              Text(threadStatus(this.store.snapshot?.thread.status || 'idle')).fontSize(12).fontColor(MUTED)
+            }.width('100%').padding({ left: 12, right: 8 })
           }
         }
-        ForEach(this.store.snapshot?.items || [], (item: ConversationItem) => {
-          ListItem() {
-            MessageCard({ item: item, imageSource: (path: string): string => this.store.imageUrl(path),
-              expanded: this.expandedTools.includes(item.id), onToggle: (id: string) => this.toggleTool(id) })
+        .height('100%')
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 10 })
+        .scrollBar(BarState.Off)
+        .onDidScroll((_offset: number, state: ScrollState) => {
+          if (state !== ScrollState.Idle) this.followLatest = this.timeline.isAtEnd();
+        })
+        .onScrollStop(() => this.followLatest = this.timeline.isAtEnd())
+        .onReachEnd(() => this.followLatest = true)
+        .onAppear(() => {
+          clearTimeout(this.timelineTimer);
+          this.timelineTimer = setTimeout(() => {
+            this.timelineTimer = -1;
+            if (this.store.screen === 'chat') this.jumpToLatest();
+          }, 80);
+        })
+        if (!this.followLatest) {
+          Button({ type: ButtonType.Capsule }) {
+            Row({ space: 4 }) {
+              Image($r('app.media.composer_latest')).width(16).height(16).accessibilityLevel('no')
+              Text('最新消息').fontSize(12).fontColor(GREEN)
+            }
           }
-        }, (item: ConversationItem) => `${JSON.stringify(item)}:${item.images?.length ? this.store.imageVersion : 0}`)
-        if (!this.store.snapshot?.items.length) {
-          ListItem() {
-            Column({ space: 10 }) {
-              Text('一切从你的想法开始').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
-              Text('描述任务，或附上一张截图。').fontSize(14).fontColor(MUTED)
-            }.width('100%').padding({ top: 80, bottom: 80 })
-          }
+          .id('jump-to-latest')
+          .height(36).padding({ left: 12, right: 12 }).backgroundColor(CARD_BACKGROUND)
+          .border({ width: 1, color: BORDER }).margin({ right: 20, bottom: 12 })
+          .accessibilityText('跳到最新消息')
+          .onClick(() => this.jumpToLatest())
         }
-        if (this.store.snapshot?.warning) {
-          ListItem() {
-            Text(this.store.snapshot?.warning || '').fontSize(12).lineHeight(20).fontColor(MUTED).padding(12)
-          }
-        }
-        ForEach(this.store.snapshot?.pendingRequests || [], (request: PendingRequest) => {
-          ListItem() {
-            RequestCard({ request: request, connected: this.store.ready, busy: this.store.busy,
-              onAnswer: (id: string, decision: string, answers: QuestionAnswer[]) => {
-                this.store.answerRequest(id, decision, answers);
-              } })
-          }
-        }, (request: PendingRequest) => request.id)
-        ListItem() {
-          Row({ space: 6 }) {
-            Text(this.store.snapshot?.thread.status === 'active' ? '●' : '·').fontSize(10).fontColor(GREEN)
-            Text(threadStatus(this.store.snapshot?.thread.status || 'idle')).fontSize(12).fontColor(MUTED)
-            Blank()
-            Button('↓ 最新')
-              .fontSize(12).height(36).fontColor(GREEN).backgroundColor(Color.Transparent)
-              .onClick(() => this.jumpToLatest())
-          }.width('100%').padding({ left: 12, right: 8 })
-        }
-      }
-      .layoutWeight(1)
-      .width('100%')
-      .padding({ left: 16, right: 16, bottom: 10 })
-      .scrollBar(BarState.Off)
-      .onTouch((event: TouchEvent) => {
-        if (event.type === TouchType.Move) this.followLatest = false;
-      })
-      .onReachEnd(() => this.followLatest = true)
-      .onAppear(() => {
-        clearTimeout(this.timelineTimer);
-        this.timelineTimer = setTimeout(() => {
-          this.timelineTimer = -1;
-          if (this.store.screen === 'chat') this.jumpToLatest();
-        }, 80);
-      })
+      }.layoutWeight(1).width('100%').clip(true)
     }
     this.composer()
   }

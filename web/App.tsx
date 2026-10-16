@@ -63,7 +63,6 @@ const statusLabel = (thread: ThreadSummary) =>
   ({ active: '运行中', idle: '就绪', notLoaded: '历史会话', systemError: '需要关注' })[
     thread.status
   ];
-
 export function App() {
   const [directory, setDirectory] = useState<TargetDirectory | null>(null);
   const [targetId, setTargetId] = useState(readSelectedTarget);
@@ -234,12 +233,14 @@ function TargetWorkspace({
   const [loading, setLoading] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [settings, setSettings] = useState<SessionSettings>({});
+  const [modelControlsOpen, setModelControlsOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const attachmentDrafts = useRef(attachmentsByThread);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
+  const [restoringEdit, setRestoringEdit] = useState(false);
   const [modal, setModal] = useState<'new' | 'settings' | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [newProject, setNewProject] = useState('');
@@ -267,6 +268,8 @@ function TargetWorkspace({
   );
   const client = useRef<LiveClient | null>(null);
   const selected = useRef<string | null>(null);
+  const snapshotRequestVersion = useRef(0);
+  const restoringThread = useRef<{ threadId: string } | null>(null);
   const tracker = useRef(new SnapshotTracker());
   const browserQueryRef = useRef(browserQuery);
   const loadListVersion = useRef(0);
@@ -274,11 +277,18 @@ function TargetWorkspace({
   const nearBottom = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
   const ready = live && !!boot?.connection.connected;
+  const selectedModelId = settings.model || snapshot?.thread.model;
+  const selectedModelLabel = selectedModelId
+    ? models.find((model) => model.id === selectedModelId)?.label || selectedModelId
+    : '沿用电脑';
+  const selectedEffortLabel = settings.effort || 'default';
   const setFailure = (e: unknown) => {
     if (!(e instanceof StaleTargetRequest)) setError(describeError(e));
   };
   const invalidateWorkspace = useCallback(() => {
     authRevision.current++;
+    restoringThread.current = null;
+    setRestoringEdit(false);
     loadListVersion.current++;
     targetScope.invalidate();
     client.current?.close();
@@ -322,16 +332,28 @@ function TargetWorkspace({
     setCreating(false);
   }, [commitSnapshot, invalidateWorkspace]);
 
-  const syncSnapshot = useCallback(async () => {
-    const id = selected.current;
-    const revision = authRevision.current;
-    if (!id || !client.current) return;
-    const incoming = await client.current.command<ThreadSnapshot>('thread.subscribe', {
-      threadId: id,
-    });
-    if (selected.current !== id || revision !== authRevision.current) return;
-    commitSnapshot((current) => tracker.current.reconcile(current, incoming));
-  }, [commitSnapshot]);
+  const syncSnapshot = useCallback(
+    async (retryWrite = false) => {
+      const id = selected.current;
+      const revision = authRevision.current;
+      if (!id || !client.current || (!retryWrite && restoringThread.current?.threadId === id))
+        return;
+      const version = ++snapshotRequestVersion.current;
+      const incoming = await client.current.command<ThreadSnapshot>('thread.subscribe', {
+        threadId: id,
+        ...(retryWrite ? { retryWrite: true } : {}),
+      });
+      if (
+        selected.current !== id ||
+        revision !== authRevision.current ||
+        version !== snapshotRequestVersion.current
+      )
+        return;
+      commitSnapshot((current) => tracker.current.reconcile(current, incoming));
+      return incoming;
+    },
+    [commitSnapshot],
+  );
   const loadThreads = useCallback(
     async (cursor?: string) => {
       const version = ++loadListVersion.current;
@@ -550,6 +572,13 @@ function TargetWorkspace({
     snapshot?.settings?.mode,
   ]);
   useEffect(() => {
+    setModelControlsOpen(false);
+  }, [snapshot?.thread.id]);
+  useEffect(() => {
+    if (!ready || snapshot?.readOnly || snapshot?.thread.status === 'active' || sending)
+      setModelControlsOpen(false);
+  }, [ready, snapshot?.readOnly, snapshot?.thread.status, sending]);
+  useEffect(() => {
     if (nearBottom.current && timeline.current)
       timeline.current.scrollTop = timeline.current.scrollHeight;
   }, [snapshot?.items, snapshot?.pendingRequests]);
@@ -588,6 +617,9 @@ function TargetWorkspace({
 
   async function chooseThread(id: string) {
     if (selected.current) attachmentDrafts.current.set(selected.current, attachments);
+    restoringThread.current = null;
+    setRestoringEdit(false);
+    snapshotRequestVersion.current++;
     selected.current = id;
     commitSnapshot(null);
     setLoading(true);
@@ -669,7 +701,8 @@ function TargetWorkspace({
   }
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!snapshot || !client.current || sending || uploading) return;
+    if (!snapshot || snapshotRef.current?.readOnly || !client.current || sending || uploading)
+      return;
     const id = snapshot.thread.id;
     const revision = authRevision.current;
     const text = draft;
@@ -703,7 +736,7 @@ function TargetWorkspace({
     }
   }
   async function upload(files: FileList | null) {
-    if (!files?.length || !selected.current) return;
+    if (!files?.length || !selected.current || snapshotRef.current?.readOnly) return;
     const revision = authRevision.current;
     const id = selected.current;
     const existing = [...attachments];
@@ -712,6 +745,7 @@ function TargetWorkspace({
     try {
       if (existing.length + files.length > 8) throw new Error('每条消息最多添加 8 张图片。');
       for (const file of files) {
+        if (snapshotRef.current?.thread.id === id && snapshotRef.current.readOnly) return;
         if (
           !['image/png', 'image/jpeg', 'image/webp'].includes(file.type) ||
           file.size > 10 * 1024 * 1024
@@ -733,6 +767,40 @@ function TargetWorkspace({
     } finally {
       setUploading(false);
       if (fileInput.current) fileInput.current.value = '';
+    }
+  }
+  async function restoreEditing() {
+    const id = selected.current;
+    if (!id || !ready || !snapshotRef.current?.readOnly || restoringThread.current) return;
+    const revision = authRevision.current;
+    const request = { threadId: id };
+    restoringThread.current = request;
+    setRestoringEdit(true);
+    setError('');
+    setNotice('');
+    try {
+      const incoming = await syncSnapshot(true);
+      if (
+        incoming &&
+        selected.current === id &&
+        revision === authRevision.current &&
+        restoringThread.current === request
+      )
+        setNotice(
+          incoming.readOnly ? '其他客户端仍在写入，可稍后再试。' : '已恢复编辑，草稿已保留。',
+        );
+    } catch (error) {
+      if (
+        selected.current === id &&
+        revision === authRevision.current &&
+        restoringThread.current === request
+      )
+        setFailure(error);
+    } finally {
+      if (restoringThread.current === request) {
+        restoringThread.current = null;
+        setRestoringEdit(false);
+      }
     }
   }
   async function older() {
@@ -1000,7 +1068,13 @@ function TargetWorkspace({
           <div className="header-actions">
             <span className="connection-pill">
               <span className={`connection-dot ${ready ? '' : 'offline'}`} />
-              {snapshot ? statusLabel(snapshot.thread) : ready ? '已连接' : '离线'}
+              {snapshot
+                ? snapshot.readOnly
+                  ? '只读'
+                  : statusLabel(snapshot.thread)
+                : ready
+                  ? '已连接'
+                  : '离线'}
             </span>
             <button
               className="icon-button"
@@ -1056,6 +1130,22 @@ function TargetWorkspace({
           </div>
         ) : (
           <>
+            {snapshot.readOnly && (
+              <div className="read-only-banner" role="status">
+                <div>
+                  <strong>只读会话</strong>
+                  <p>其他客户端正在写入此会话。可以查看历史消息，刷新可读取最新内容。</p>
+                </div>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!ready || restoringEdit}
+                  onClick={() => void restoreEditing()}
+                >
+                  {restoringEdit ? '正在尝试…' : '尝试恢复编辑'}
+                </button>
+              </div>
+            )}
             <div
               className="timeline"
               ref={timeline}
@@ -1078,8 +1168,12 @@ function TargetWorkspace({
               ))}
               {!snapshot.items.length && (
                 <div className="empty-state compact">
-                  <h2>一切从你的想法开始</h2>
-                  <p>描述任务，或附上一张截图。</p>
+                  <h2>{snapshot.readOnly ? '暂无历史消息' : '一切从你的想法开始'}</h2>
+                  <p>
+                    {snapshot.readOnly
+                      ? '刷新可读取其他客户端的新消息。'
+                      : '描述任务，或附上一张截图。'}
+                  </p>
                 </div>
               )}
               {snapshot.warning && <p className="notice">{snapshot.warning}</p>}
@@ -1087,8 +1181,9 @@ function TargetWorkspace({
                 <RequestCard
                   key={request.id}
                   request={request}
-                  connected={ready}
+                  connected={ready && !snapshot.readOnly}
                   answer={async (requestId, answer) => {
+                    if (snapshotRef.current?.readOnly) return;
                     const revision = authRevision.current;
                     await client.current!.command('request.respond', { requestId, ...answer });
                     if (revision !== authRevision.current) return;
@@ -1104,13 +1199,21 @@ function TargetWorkspace({
               )}
             </div>
             <form className="composer" onSubmit={send}>
-              <ModelControls
-                models={models}
-                value={settings}
-                onChange={setSettings}
-                disabled={!ready || snapshot.thread.status === 'active' || sending}
-                planAvailable={boot.capabilities.planMode}
-              />
+              {modelControlsOpen && (
+                <div className="composer-model-panel" id="composer-model-settings">
+                  <ModelControls
+                    models={models}
+                    value={settings}
+                    onChange={(value) => {
+                      if (!snapshotRef.current?.readOnly) setSettings(value);
+                    }}
+                    disabled={
+                      !ready || snapshot.readOnly || snapshot.thread.status === 'active' || sending
+                    }
+                    planAvailable={boot.capabilities.planMode}
+                  />
+                </div>
+              )}
               {!!attachments.length && (
                 <div className="attachment-list">
                   {attachments.map((image) => (
@@ -1120,8 +1223,9 @@ function TargetWorkspace({
                       <button
                         type="button"
                         aria-label={`移除 ${image.name}`}
-                        disabled={sending || uploading}
+                        disabled={snapshot.readOnly || sending || uploading}
                         onClick={() => {
+                          if (snapshotRef.current?.readOnly) return;
                           const updated = attachments.filter((x) => x.id !== image.id);
                           setAttachments(updated);
                           attachmentDrafts.current.set(snapshot.thread.id, updated);
@@ -1138,12 +1242,17 @@ function TargetWorkspace({
                   aria-label="发送给 Codex 的消息"
                   value={draft}
                   placeholder={
-                    snapshot.thread.status === 'active' ? '追加一条指令…' : '描述你想做的事…'
+                    snapshot.readOnly
+                      ? '只读模式，恢复编辑后可发送消息'
+                      : snapshot.thread.status === 'active'
+                        ? '追加一条指令…'
+                        : '描述你想做的事…'
                   }
                   maxLength={64000}
                   rows={3}
-                  disabled={sending}
+                  disabled={snapshot.readOnly || sending}
                   onChange={(e) => {
+                    if (snapshotRef.current?.readOnly) return;
                     setDraft(e.target.value);
                     storeDraft(snapshot.thread.id, e.target.value, targetId);
                   }}
@@ -1159,20 +1268,45 @@ function TargetWorkspace({
                   }}
                 />
                 <div className="composer-tools">
+                  <button
+                    type="button"
+                    className="composer-model-button"
+                    aria-label={`模型与思考强度：${selectedModelLabel} · ${selectedEffortLabel}${settings.mode === 'plan' ? ' · Plan' : ''}`}
+                    aria-expanded={modelControlsOpen}
+                    aria-controls="composer-model-settings"
+                    title={`${selectedModelLabel} · ${selectedEffortLabel}`}
+                    disabled={
+                      !ready || snapshot.readOnly || snapshot.thread.status === 'active' || sending
+                    }
+                    onClick={() => setModelControlsOpen((open) => !open)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') setModelControlsOpen(false);
+                    }}
+                  >
+                    <span className="composer-model-name">{selectedModelLabel}</span>
+                    <span className="composer-effort">{selectedEffortLabel}</span>
+                    {settings.mode === 'plan' && <span className="composer-plan">Plan</span>}
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path d="m5 6.5 3 3 3-3" />
+                    </svg>
+                  </button>
                   <input
                     ref={fileInput}
                     type="file"
                     accept="image/png,image/jpeg,image/webp"
                     multiple
                     hidden
+                    disabled={snapshot.readOnly}
                     onChange={(e) => void upload(e.target.files)}
                   />
                   <button
                     type="button"
-                    className="icon-button"
+                    className="icon-button composer-image-button"
                     aria-label="添加图片"
+                    title={uploading ? '正在上传图片…' : '添加图片'}
                     disabled={
                       !ready ||
+                      snapshot.readOnly ||
                       !boot.capabilities.images ||
                       uploading ||
                       sending ||
@@ -1180,22 +1314,18 @@ function TargetWorkspace({
                     }
                     onClick={() => fileInput.current?.click()}
                   >
-                    <Icon name="image" />
+                    {uploading ? <span className="spinner" /> : <Icon name="image" />}
                   </button>
-                  <small>
-                    {uploading
-                      ? '正在上传…'
-                      : snapshot.thread.status === 'active'
-                        ? '追加到当前任务'
-                        : '文字与图片'}
-                  </small>
                   <div className="input-actions">
                     {snapshot.thread.activeTurnId && (
                       <button
                         type="button"
-                        className="secondary"
-                        disabled={!ready}
+                        className="secondary composer-stop-button"
+                        aria-label="停止"
+                        title="停止当前任务"
+                        disabled={!ready || snapshot.readOnly}
                         onClick={() => {
+                          if (snapshotRef.current?.readOnly) return;
                           void client.current
                             ?.command('turn.interrupt', {
                               threadId: snapshot.thread.id,
@@ -1205,14 +1335,16 @@ function TargetWorkspace({
                             .catch(setFailure);
                         }}
                       >
-                        <Icon name="stop" /> 停止
+                        <Icon name="stop" />
                       </button>
                     )}
                     <button
                       className="send-button primary"
                       aria-label="发送消息"
+                      title={snapshot.thread.status === 'active' ? '追加到当前任务' : '发送消息'}
                       disabled={
                         !ready ||
+                        snapshot.readOnly ||
                         sending ||
                         uploading ||
                         (!draft.trim() && !attachments.length) ||
@@ -1225,9 +1357,11 @@ function TargetWorkspace({
                 </div>
               </div>
               <div className="composer-caption" role="status">
-                {snapshot.thread.canAcceptDirectInput === false
-                  ? '此会话暂不接受远程输入，请在电脑处理。'
-                  : notice || '任务在你的电脑上运行。关闭页面不会停止任务。'}
+                {snapshot.readOnly
+                  ? notice || '草稿与图片已保留。只读时无法发送、停止任务或处理确认。'
+                  : snapshot.thread.canAcceptDirectInput === false
+                    ? '此会话暂不接受远程输入，请在电脑处理。'
+                    : notice || '任务在你的电脑上运行。关闭页面不会停止任务。'}
               </div>
             </form>
           </>
