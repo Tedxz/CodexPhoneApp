@@ -4,5 +4,5 @@ harmony/**/.hvigor/
 harmony/**/oh_modules/
 harmony/**/build/
 harmony/**/*.ets
-harmony/oh-package-lock.json5
+**/oh-package-lock.json5
 harmony/**/local.properties

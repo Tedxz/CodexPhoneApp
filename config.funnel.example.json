@@ -1,0 +1,9 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "publicUrl": "https://your-server.your-tailnet.ts.net",
+  "allowedOrigins": [],
+  "projects": [{ "name": "CodexPhoneApp", "path": "." }],
+  "sshTargets": [],
+  "dataDir": ".codex-phone"
+}

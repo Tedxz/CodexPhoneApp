@@ -1,16 +1,55 @@
+# Dependencies and build caches (including tools run from the repository root)
 node_modules/
+oh_modules/
+.hvigor/
+.npm/
+.vite/
+.cache/
 dist/
-.codex-phone/
 coverage/
+*.tsbuildinfo
+
+# Local gateway state, uploads and acceptance workspaces
+.codex-phone/
+.codex-phone-*/
 tmp/
+test-results/
+playwright-report/
+blob-report/
 *.log
+
+# Local configuration and registry credentials; keep distributable examples
 .env
 .env.*
 !.env.example
+!.env.*.example
 config.local.json
-.DS_Store
-*.tsbuildinfo
+config.*.local.json
+config.local.*.json
+.ohpmrc
+
+# Certificates, signing material and exported HarmonyOS packages
+signing/
 *.pem
 *.key
 *.p12
 *.pfx
+*.p7b
+*.cer
+*.jks
+*.keystore
+*.hap
+*.hsp
+*.app
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

@@ -25,11 +25,14 @@ HarmonyOS 7 原生客户端位于 [`harmony/`](harmony/README.md)，使用 ArkTS
 需要 Node.js 22.13 或更新版本，以及已登录、正在运行的电脑端 Codex。
 
 ```sh
-npm install
+npm ci
+test -f config.local.json || cp config.example.json config.local.json
 npm run build
 npm run doctor
 npm start
 ```
+
+配置复制命令会保留已有 `config.local.json`。仓库提供默认本机模板 `config.example.json` 和 Funnel 模板 `config.funnel.example.json`；后者需要替换实际域名。开发环境、文件管理与 CI 说明见 [开发说明](CONTRIBUTING.md)。
 
 另开终端生成一次性配对二维码：
 

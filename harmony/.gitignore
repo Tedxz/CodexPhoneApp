@@ -1,11 +1,22 @@
+# DevEco / Hvigor generated files
 oh_modules/
 .hvigor/
 .idea/
 **/build/
 local.properties
+.ohpmrc
+
+# Local signing configuration and exported artifacts
+signing/
+build-profile.local.json5
+*.pem
+*.key
 *.p7b
 *.cer
 *.p12
+*.pfx
 *.jks
-signing/
-build-profile.local.json5
+*.keystore
+*.hap
+*.hsp
+*.app

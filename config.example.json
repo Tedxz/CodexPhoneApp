@@ -4,5 +4,6 @@
   "publicUrl": "http://127.0.0.1:8787",
   "allowedOrigins": [],
   "projects": [{ "name": "CodexPhoneApp", "path": "." }],
+  "sshTargets": [],
   "dataDir": ".codex-phone"
 }
