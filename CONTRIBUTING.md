@@ -1,8 +1,12 @@
-# 开发说明
+# 贡献指南
 
-## 从干净工作区开始
+欢迎提交问题、文档改进和 Pull Request。请在 Issue 中说明复现步骤、预期与实际行为，并附上脱敏后的版本和错误信息。涉及协议或客户端交互的较大变更，建议先讨论兼容范围。
 
-网关和网页使用 Node.js 22.13 或更新版本；`.nvmrc` 选择 Node 22，CI 使用同一版本文件。已安装 nvm 时可以运行 `nvm install`、`nvm use`。HarmonyOS 构建独立使用 DevEco Studio 自带的 Node、SDK 和 JDK，见 [原生工程说明](harmony/README.md)。
+## 开发环境
+
+网关与网页需要 Node.js 22.13 或更新版本；`.nvmrc` 选择 Node 22，CI 使用同一版本文件。已安装 nvm 时运行 `nvm install`、`nvm use`。HarmonyOS 构建独立使用 DevEco Studio 的 Node、SDK 和 JDK，见[原生工程说明](harmony/README.md)。
+
+在项目根目录执行：
 
 ```sh
 npm ci
@@ -10,35 +14,50 @@ test -f config.local.json || cp config.example.json config.local.json
 npm run check
 ```
 
-首次配置使用 `config.example.json`，本机已有配置时上面的命令会保留它。Funnel 部署可参考 `config.funnel.example.json`，把示例域名替换为实际域名；不要把模板直接覆盖到已部署的配置上。SSH 目标填写在 `sshTargets`，完整示例见 [多 Server 配置](docs/MULTI-SERVER.md)。路径相对于运行命令时的工作目录解析，日常从仓库根目录运行。
+配置复制命令会保留已有文件。路径相对于运行命令的工作目录解析；日常从仓库根目录运行。网关直接使用开发依赖中的 `tsx`，部署时也需要安装开发依赖。
 
 ## 常用命令
 
-| 命令                     | 用途                                      |
-| ------------------------ | ----------------------------------------- |
-| `npm run dev`            | 运行网关，读取本地配置                    |
-| `npm run web:dev`        | 启动网页开发服务器                        |
-| `npm run build`          | TypeScript 检查并构建网页                 |
-| `npm run format:check`   | 检查格式                                  |
-| `npm test`               | 运行隔离的自动测试，无需真实 Codex 或手机 |
-| `npm run check`          | 格式、自动测试和网页构建                  |
-| `npm run harmony:doctor` | 检查本机 DevEco 环境                      |
-| `npm run harmony:build`  | 编译 unsigned HAP                         |
+| 命令                     | 用途                                    |
+| ------------------------ | --------------------------------------- |
+| `npm run dev`            | 运行开发网关，读取本地配置              |
+| `npm run web:dev`        | 启动网页开发服务器                      |
+| `npm run build`          | TypeScript 检查与网页生产构建           |
+| `npm run format`         | 使用 Prettier 格式化受支持文件          |
+| `npm run format:check`   | 检查格式                                |
+| `npm test`               | 运行隔离自动测试，无需真实 Codex 或手机 |
+| `npm run check`          | 依次检查格式、自动测试与网页构建        |
+| `npm run harmony:doctor` | 检查本机 DevEco 环境                    |
+| `npm run harmony:build`  | 编译未签名 HAP                          |
 
-网页单独运行时，把其 origin 加入本机配置的 `allowedOrigins`，并使用该 origin 配对，详见 [README](README.md#开发与验证)。共享接口或行为变更需同时检查网页和原生客户端；TypeScript 与 ArkTS 协议分别位于 `shared/protocol.ts` 和 `harmony/entry/src/main/ets/model/Protocol.ets`。
+网页开发需要同时运行网关和 Vite。把 `http://127.0.0.1:5173` 加入本机配置的 `allowedOrigins`，重启网关，然后运行 `npm run pair -- --url http://127.0.0.1:5173`。
 
-`npm run doctor` 会连接本机配置中的真实 Codex 后端进行只读探测。`npm run test:live -- --run` 会创建隔离测试会话并发送真实任务，只在明确需要端到端验收时手动执行；CI 不执行这两类检查，也不启动 Codex、访问用户会话或进行手机配对。
+## 模块与验证
 
-## 应提交和应保留在本机的文件
+项目模块见 [README](README.md#架构与模块)。网关与网页共用 `shared/protocol.ts`，原生协议位于 `harmony/entry/src/main/ets/model/Protocol.ets`。接口变更需同步两种类型与 [API 文档](docs/API.md)，验证两种客户端的行为及旧接口兼容性。
 
-- 提交源码、工程配置、无凭据的示例、`package-lock.json` 和必要文档。`npm ci` 依赖锁文件；修改 npm 依赖时同步更新它。
-- 当前 Harmony 工程没有第三方包，因此未生成 `oh-package-lock.json5`。以后由 ohpm 生成时，确认不包含本机敏感信息后提交；不要手写锁文件。它不被 Git 忽略，只排除自动格式化。
-- `.gitignore` 排除依赖、缓存、构建产物、日志、测试报告、本机配置、网关认证数据、签名材料及 HAP 等安装包。额外网关配置采用 `config.<name>.local.json`，额外数据目录采用 `.codex-phone-<name>/`；两者都已忽略。
-- 真机签名保持在被忽略的本地副本或私有目录中，仓库的 `harmony/build-profile.json5` 保持无签名。原生源码与资源更新到签名副本时保留其私有签名配置。
-- `docs/evidence/` 仅保留审查后的验收证据；原始调试日志、配对链接、Cookie、其他会话正文放在忽略目录 `tmp/`。`docs/evidence/` 中的归档证据不自动格式化。
+按变更选择必要验证：文档应检查链接和命令；行为变更应补充能捕获回归的测试；原生源码和资源变更需执行真实 ArkTS 构建，界面变更还需在模拟器或设备上检查。`npm run check` 中的原生逻辑测试使用系统 API 替身，不能替代 SDK 编译与真机验证。
+
+`npm run doctor` 连接配置中的真实后端进行只读探测。`npm run test:live -- --run` 会创建隔离会话并发送真实任务，只在需要端到端验收时手动执行。CI 不执行这两类检查，也不启动 Codex、访问用户会话或进行手机配对。完整方法见[验收清单](docs/ACCEPTANCE.md)。
+
+## 提交约定
+
+- 提交源码、工程配置、无凭据的示例、必要文档及依赖锁文件；修改 npm 依赖时同步 `package-lock.json`。
+- 当前 Harmony 工程没有第三方包。以后由 ohpm 生成锁文件时，检查不含本机敏感信息后提交，不手写锁文件。
+- 本机网关配置使用 `config.local.json` 或 `config.<name>.local.json`，数据目录使用 `.codex-phone/` 或 `.codex-phone-<name>/`；这些文件与目录均已忽略。
+- 原始验收报告和截图放在被忽略的 `docs/evidence/` 或 `tmp/`。公开文档使用脱敏示例，不提交真实会话、设备标识、配对链接、Cookie 或私人部署信息。
+- 真机签名在本地副本或私有目录完成；仓库内 `harmony/build-profile.json5` 保持无签名配置。忽略规则不能保护已经跟踪的文件，提交前仍应检查差异。
+
+提交前运行 `npm run check` 并检查 `git diff --check` 与 `git diff --cached`。PR 描述说明问题、改动后的行为、验证结果和未覆盖范围；避免把特定机器上的验收结果写成所有环境的兼容承诺。
 
 ## 持续集成
 
-[Checks](.github/workflows/ci.yml) 在主分支推送、PR 和手动触发时，分别在 Linux 与 macOS 上执行 `npm ci` 和 `npm run check`。Linux 安装本地 SFTP 子系统以运行传输夹具；它不需要 SSH 服务器登录。原生逻辑测试使用系统接口替身，不要求 Harmony SDK；真实 ArkTS 编译、签名和真机操作仍在安装了 DevEco 的环境中验证。
+[Checks](.github/workflows/ci.yml) 在主分支推送、PR 和手动触发时，分别在 Linux 与 macOS 上执行 `npm ci` 和 `npm run check`。Linux 安装本地 SFTP 子系统用于传输测试，无需 SSH 服务器登录。真实 ArkTS 编译、签名和手机操作在安装 DevEco 的环境中单独验证。
 
-工作流使用 GitHub 官方 [checkout](https://github.com/actions/checkout) 和 [setup-node](https://github.com/actions/setup-node)。当前仓库未配置远程地址时，新增工作流只是文件配置，不代表已在 GitHub 执行。
+CI 是否通过以对应提交的 GitHub Actions 结果为准。本地检查通过不代表远程工作流已经执行。
+
+## 许可与安全
+
+贡献的原创代码和文档使用仓库的 [MIT License](LICENSE)。引入第三方资源时，记录来源与适用许可，更新[第三方声明](THIRD_PARTY_NOTICES.md)；不能将第三方品牌资源自动归入项目的 MIT 授权。
+
+安全问题与敏感材料处理见 [SECURITY.md](SECURITY.md)。

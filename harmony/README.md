@@ -2,7 +2,7 @@
 
 面向 HarmonyOS 7 的 ArkTS / ArkUI 原生手机应用，通过已有网关的 HTTP 和 WebSocket 接口访问电脑上的 Codex 会话。界面、图片选择和凭据存储使用鸿蒙原生能力。
 
-应用图标沿用 Codex 的花形与终端标记，并适配本 App 的绿色系；图标来源、资源位置和真机验证见[图标说明](../docs/ICON-ASSETS.md)。
+应用图标沿用 Codex 的花形与终端标记，并适配本 App 的绿色系；该图标不适用项目 MIT 许可，来源与资源位置见[图标说明](../docs/ICON-ASSETS.md)。
 
 ## 功能
 
@@ -17,7 +17,7 @@
 
 ## 开发环境与构建
 
-这台 Mac 已安装官方 DevEco Studio 26.0.0.851，内置 HarmonyOS SDK 26.0.0.105 Release（API 26）、Node 24.14.1、JBR 25.0.2、Hvigor 6.26.8 与 ohpm 26.0.0.630。官方下载 ZIP 的 SHA-256 和 macOS 签名、公证均已验证。工具路径：`/Applications/DevEco-Studio.app`。
+安装 DevEco Studio 26 及其 HarmonyOS API 26 工具链。仓库中的 macOS 构建脚本默认从 `/Applications/DevEco-Studio.app` 读取内置 Node、JDK、SDK、Hvigor、ohpm 和 HDC；实际版本由 `harmony:doctor` 输出。
 
 在仓库根目录执行：
 
@@ -34,11 +34,11 @@ npm run harmony:build
 harmony/entry/build/default/outputs/default/entry-default-unsigned.hap
 ```
 
-默认无签名构建可供本地模拟器验收。真实手机需要与 `com.xiezheng.codexphone` 包名和目标设备匹配的开发者签名，不能直接把 unsigned HAP 当作真机可安装包。签名材料与私钥属于本地配置，不应提交到 Git。
+默认无签名构建可供本地模拟器验收。真实手机需要与 `AppScope/app.json5` 中的 `bundleName` 及目标设备匹配的开发者签名，不能直接把 unsigned HAP 当作真机可安装包。签名材料与私钥属于本地配置，不应提交到 Git。
 
-本机的真机签名工程使用被 Git 忽略的 `tmp/harmony-phone/` 副本，已生成并安装签名 HAP：`tmp/harmony-phone/entry/build/default/outputs/default/entry-default-signed.hap`。这是开发调试包，安装范围由开发 profile 中登记的设备决定。更新代码时同步源文件到该副本，但保留其根目录的 `build-profile.json5`，然后在副本目录执行 `source ../../scripts/harmony-env.sh` 并运行 Hvigor `assembleHap`。仓库内的 `harmony/build-profile.json5` 保持无签名配置。
+建议在被 Git 忽略的本地副本中配置签名，保留其私有 `build-profile.json5`，仓库内的同名文件保持无签名。通过 DevEco 的签名流程完成开发者登录，并为目标设备生成匹配的开发证书和 profile；不要将签名配置、证书或私钥复制回公开源码。
 
-首次签名需在 `devecocli auth login` 完成工具登录，网站登录不能替代它。若刚完成华为开发者实名认证，已有工具会话仍可能保留旧状态；先 `devecocli auth logout`，再重新登录并生成签名。不要把签名配置、证书或私钥复制回源码目录。
+应用包名是安装、签名与私有数据的身份标识，当前沿用既有值以保持升级兼容。独立分发自己的应用时，可在本地工程中设置自己的包名并重新配置签名；这将成为独立安装，不能当作原应用的覆盖升级。
 
 可执行 `bash scripts/harmony-build.sh release` 构建 release 模式；发布分发还需相应签名与发布配置。本工程要求 HarmonyOS 7 / API 26，使用该版本的原生 WebSocket Origin 端口支持，不支持旧系统。
 
@@ -49,10 +49,9 @@ harmony/entry/build/default/outputs/default/entry-default-unsigned.hap
 ```sh
 npm run doctor
 npm start
-npm run pair
 ```
 
-手机应用中填写网关地址和电脑生成的一次性凭据。Funnel 地址使用 `https://`；局域网可使用 `http://电脑局域网IP:8787`。地址不要包含 `/api/v1` 等路径。不同地址的登录凭据分别保存，不会将一个入口的凭据转发给另一个入口。
+保持网关终端运行，另开终端从仓库根目录执行 `npm run pair`。手机应用中填写网关地址和电脑生成的一次性凭据。Funnel 地址使用 `https://`；局域网可使用 `http://电脑局域网IP:8787`。地址不要包含 `/api/v1` 等路径。不同地址的登录凭据分别保存，不会将一个入口的凭据转发给另一个入口。
 
 首页在前台每 10 秒刷新机器目录，最多并发查询 4 个 Server；进入会话或退到后台后暂停目录轮询。选中机器后只建立该机器的实时连接。Server 离线或登录失效会单独标注，不影响其他连接。旧网关仅在机器目录接口返回 404 时作为单一本机目标显示。
 
@@ -84,6 +83,6 @@ npm run harmony:build
 
 `npm run check` 包含原有网页/网关测试和原生协议、状态测试；其中原生网络与安全存储通过系统 API 替身运行，以覆盖错误和竞态。真正的 ArkTS 类型检查、资源编译和 HAP 打包由 `harmony:build` 完成。
 
-本机已创建独立 `CodexPhoneApi26` 模拟器（HarmonyOS 7.0.0.107），可在 DevEco 中启动，或使用已安装的 `~/.local/bin/devecocli`。最终运行证据和真机限制记录在 [原生验收记录](../docs/HARMONYOS-ACCEPTANCE.md)。
+在 DevEco 中创建与工程 API 级别匹配的模拟器，安装未签名构建进行界面检查；真实手机使用自己的签名包。按[原生验收清单](../docs/HARMONYOS-ACCEPTANCE.md)分别记录模拟器、真机和不同网络的结果，原始材料保存在本地忽略目录。
 
 官方参考：[DevEco Studio 下载](https://developer.huawei.com/consumer/cn/download/)、[命令行工具](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/ide-commandline-get)、[Network Kit HTTP](https://developer.huawei.com/consumer/en/doc/harmonyos-references-V5/js-apis-http-V5)、[Asset Store](https://developer.huawei.com/consumer/en/doc/harmonyos-references/js-apis-asset)。

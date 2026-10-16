@@ -1,6 +1,6 @@
 # 部署与维护
 
-本机已采用仅 Funnel 的登录启动与保活方案，完整配置步骤、日常启停和更新命令见 [本机 Funnel 网关配置与维护](FUNNEL-SERVICE.md)。
+本文介绍通用部署配置、网络入口与故障排查。macOS 上使用 Funnel 和 LaunchAgent 的完整步骤见 [Funnel 服务指南](FUNNEL-SERVICE.md)。
 
 ## 配置
 
@@ -17,7 +17,9 @@
 | `dataDir`        | 当前工作目录下的 `.codex-phone`；存储设备认证与上传图片                  |
 | `tls`            | 可选 `{ "cert": "/绝对/证书.pem", "key": "/绝对/私钥.pem" }`             |
 
-建议所有文件路径使用绝对路径。`publicUrl` 和允许来源必须准确匹配浏览器的协议、主机和端口。更改配置后重启网关。项目列表限制手机能选择的工作目录；Codex 对文件和命令的实际权限仍使用电脑端策略。
+SSH 目标通过 `sshTargets` 配置，字段及图片目录要求见[连接配置](MULTI-SERVER.md)。默认 socket 路径会使用 `CODEX_HOME` 指定的 Codex 目录（如有设置）。
+
+建议所有文件路径使用绝对路径。`publicUrl` 和允许来源必须准确匹配浏览器的协议、主机和端口。更改配置后重启网关。项目列表限制新建会话可选择的工作目录，不是已有历史的访问控制列表；Codex 对文件和命令的实际权限仍使用电脑端策略。
 
 ## 局域网
 
@@ -28,7 +30,7 @@
 
 长期使用 HTTPS 时，准备与访问名称匹配、受手机信任的证书，设置 `tls.cert`、`tls.key` 和 `https://...` 的 `publicUrl`。局域网 IP 证书须包含该 IP 的 SAN；自建 CA 须在手机端安装并信任。只放置服务器证书和私钥到电脑，不把 CA 私钥传到手机。证书工具的安装与设备信任需由使用者按其网络环境完成。
 
-局域网和 Funnel 两种地址属于不同网站来源，需要分别登录。网关按 `publicUrl`/TLS 配置统一决定 cookie 的 Secure 属性：Funnel HTTPS 配置不能同时用于 HTTP 局域网登录。要兼用两种入口，请给局域网也配置 HTTPS；或者用分别匹配入口的配置运行两个网关，绑定不同监听地址或端口。同一用户可共用 `dataDir` 保留设备记录，两种来源的浏览器 cookie 仍分别管理。本机当前只部署 Funnel 网关，已停用独立的局域网网关，也不配置局域网登录自启。
+局域网和 Funnel 两种地址属于不同网站来源，需要分别登录。网关按 `publicUrl`/TLS 配置统一决定 cookie 的 Secure 属性：Funnel HTTPS 配置不能同时用于 HTTP 局域网登录。要兼用两种入口，请给局域网也配置 HTTPS；或者用分别匹配入口的配置运行两个网关，绑定不同监听地址或端口。同一用户可共用 `dataDir` 保留设备记录，两种来源的浏览器 cookie 仍分别管理。
 
 ## Tailscale Funnel
 
@@ -52,7 +54,7 @@ tailscale funnel status
 
 ## macOS 登录启动与保活
 
-本机只为 Funnel 网关配置当前用户的 LaunchAgent，服务名称为 `local.codex-phone`，读取项目根目录的 `config.local.json`，监听 `127.0.0.1:8787`。Tailscale 保持已有的登录启动配置，Codex 不设为自启动。登录后，即使 Codex 尚未打开，网关也会运行；手动打开 Codex 后，网关会自动重连共享后端。该部署从用户登录开始生效，不支持开机后尚未登录的访问。
+可使用当前用户的 LaunchAgent 托管网关，服务名称为 `local.codex-phone`。脚本读取当前配置并记录其路径；使用 Funnel 时，建议只监听 `127.0.0.1:8787`。Tailscale 的启动设置由使用者单独管理。即使 Codex 尚未打开，网关也可运行，Codex 启动后会自动重连共享后端。该方式从用户登录开始生效，不提供开机尚未登录时的访问。
 
 先确认前台运行和诊断正常，再生成 plist：
 
@@ -61,7 +63,7 @@ node --import tsx scripts/launch-agent.ts --output /tmp/codex-phone.plist
 plutil -lint /tmp/codex-phone.plist
 ```
 
-脚本会记录当前 Node 可执行文件的绝对路径、项目目录、配置路径和 PATH，设置 `RunAtLoad=true`、`KeepAlive=true` 和 15 秒重启节流。服务加载后立即启动，正常结束和异常退出都由 launchd 自动重新拉起。标准输出和错误输出分别保存为数据目录下的 `logs/gateway.out.log`、`logs/gateway.err.log`，本机对应 `.codex-phone/logs/`。脚本不会启动 Codex 或 Funnel，也不会自动加载服务。确认配置后，先停止占用相同监听地址的旧网关，再安装并手动加载：
+脚本会记录当前 Node 可执行文件的绝对路径、项目目录、配置路径和 PATH，设置 `RunAtLoad=true`、`KeepAlive=true` 和 15 秒重启节流。服务加载后立即启动，正常结束和异常退出都由 launchd 自动重新拉起。标准输出和错误输出分别保存为数据目录下的 `logs/gateway.out.log`、`logs/gateway.err.log`；默认位于 `.codex-phone/logs/`。脚本不会启动 Codex 或 Funnel，也不会自动加载服务。确认配置后，先停止占用相同监听地址的旧网关，再安装并手动加载：
 
 ```sh
 node --import tsx scripts/launch-agent.ts --install
@@ -86,14 +88,6 @@ rm "$HOME/Library/LaunchAgents/local.codex-phone.plist"
 ```
 
 若服务已停止，`bootout` 会提示找不到服务，此时可直接移除 plist。升级 Node 或移动项目导致绝对路径改变时，按以上步骤移除旧配置后重新生成、安装并加载。脚本不负责日志轮转，长期运行时可按需清理旧日志。停止网关不会停止电脑端正在运行的 Codex 任务。
-
-## 本机托管验收（2026-10-16）
-
-`local.codex-phone` 已安装、启用并加载，只有 `127.0.0.1:8787` 的 Funnel 网关在监听；旧局域网网关已停止。日常使用不需要再执行 `npm start`。进程 PID 会随自动重启变化，以 `launchctl print gui/$(id -u)/local.codex-phone` 为准；旧的两个网关 PID 文件已移除，当前托管信息保存在 `.codex-phone/run/gateway-service.json`。
-
-实测正常终止（SIGTERM）和强制终止（SIGKILL）后均由 launchd 自动恢复；卸载/重新加载服务后健康检查通过。LaunchAgent 文件权限为 `0600`，当前用户登录自启已配置。没有实际注销或重启 Mac，不将加载验收当作真实重启验收。见 [服务保活报告](evidence/2026-10-16-funnel-service/service-report.json)。
-
-Funnel 域名的 HTTPS 健康页及已认证 bootstrap 返回 200，未认证 bootstrap 返回 401，WSS 连接和心跳通过，共享 Codex 后端已连接，TLS 校验保持启用。检查使用的临时客户端已撤销，原有 3 条授权保留，未发送 Codex 命令。见 [连接报告](evidence/2026-10-16-funnel-service/connection-report.json)。`npm run check` 的格式检查、114 项测试、TypeScript 和网页生产构建全部通过。Tailscale 与 Codex 的启动设置未修改。
 
 ## 诊断
 

@@ -1,15 +1,15 @@
-# 本机 Funnel 网关配置与维护
+# Funnel 网关配置与维护
 
-本文记录 2026-10-16 已完成的本机配置。当前服务已安装，日常使用无需重复安装或运行 `npm start`。
+本文介绍如何在自己的 macOS 电脑上使用 Tailscale Funnel 提供 HTTPS 入口，并通过 LaunchAgent 托管网关。请将示例域名和路径替换为实际值。已安装服务时按日常操作维护，不重复安装或运行前台网关。
 
 ## 运行方式
 
 手机通过 Tailscale Funnel 的 HTTPS 地址访问网关，Funnel 转发到本机 `127.0.0.1:8787`，网关再连接当前用户的 Codex 共享后端。
 
-| 项目         | 本机配置                                               |
+| 项目         | 示例配置                                               |
 | ------------ | ------------------------------------------------------ |
-| 公网地址     | <https://xz-macbookair.tail9ddfa1.ts.net>              |
-| 项目目录     | `/Users/xiezheng/Code/CodexPhoneApp`                   |
+| 公网地址     | <https://your-server.your-tailnet.ts.net>              |
+| 项目目录     | `/absolute/path/to/CodexPhoneApp`                      |
 | 网关配置     | 项目根目录的 `config.local.json`                       |
 | 监听地址     | `127.0.0.1:8787`                                       |
 | 服务名称     | `local.codex-phone`                                    |
@@ -19,35 +19,35 @@
 
 macOS LaunchAgent 在当前用户登录后启动网关，并在进程正常退出或异常退出后自动恢复。配置使用 `RunAtLoad=true`、`KeepAlive=true` 和 `ThrottleInterval=15`；15 秒是重启节流设置，不是恢复时间保证。
 
-Tailscale 沿用已有的登录启动设置。Codex 由用户手动打开，网关会自动重连其共享后端。局域网网关已停用。
+Tailscale 的登录启动需另行配置。Codex 由用户启动，网关会自动重连其共享后端。本例仅配置一个回环监听的网关。
 
 重启 Mac 后，先登录该用户，网关和 Tailscale 才能恢复访问；使用会话功能还需手动打开 Codex。电脑须联网并保持系统唤醒，锁屏不等同于系统睡眠；睡眠或关机期间无法访问。此配置不提供开机未登录时的访问。
 
 ## 首次安装或迁移到其他电脑
 
-以下是复现配置的步骤；本机已完成。换电脑时替换项目路径和 Funnel 域名。
+首次安装时按以下顺序操作；迁移时保留所需的配置与数据，并替换项目路径和 Funnel 域名。
 
 ### 1. 准备项目与配置
 
 安装 Node.js 22.13 或更新版本，在项目目录执行：
 
 ```sh
-cd /Users/xiezheng/Code/CodexPhoneApp
+cd /absolute/path/to/CodexPhoneApp
 npm ci
 npm run build
 ```
 
 网关直接运行 TypeScript，依赖开发依赖中的 `tsx`，不要使用 `npm ci --omit=dev`；若环境设置了仅安装生产依赖，改用 `npm ci --include=dev`。
 
-编辑 `config.local.json`，Funnel 模式的关键字段如下。已有配置应只修改对应字段，保留其他项目和来源设置；迁移时保留原来的数据目录才能保留设备授权。
+首次配置可复制 `config.funnel.example.json` 为 `config.local.json`。编辑 `config.local.json`，Funnel 模式的关键字段如下。已有配置应只修改对应字段，保留其他项目和来源设置；迁移时保留原来的数据目录才能保留设备授权。
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 8787,
-  "publicUrl": "https://xz-macbookair.tail9ddfa1.ts.net",
-  "dataDir": "/Users/xiezheng/Code/CodexPhoneApp/.codex-phone",
-  "projects": [{ "name": "CodexPhoneApp", "path": "/Users/xiezheng/Code/CodexPhoneApp" }]
+  "publicUrl": "https://your-server.your-tailnet.ts.net",
+  "dataDir": "/absolute/path/to/CodexPhoneApp/.codex-phone",
+  "projects": [{ "name": "CodexPhoneApp", "path": "/absolute/path/to/CodexPhoneApp" }]
 }
 ```
 
@@ -92,13 +92,13 @@ launchctl print gui/$(id -u)/local.codex-phone
 
 `--install` 只生成文件，不加载服务，且拒绝覆盖已有文件；`bootstrap` 才会加载并启动。以上命令在当前用户终端运行，不需要 `sudo`。已加载的服务不要重复 `bootstrap`，应按下节重新加载。
 
-生成脚本会固定当前 Node 可执行文件、项目目录、配置文件和日志的绝对路径，以及当时的 `PATH`，不依赖登录终端的初始化脚本。plist 权限为 `0600`。本机安装时记录的 Node 路径为 `/Users/xiezheng/.hermes/node/bin/node`；更新 Node 后若该路径仍有效，无需重新生成。
+生成脚本会固定当前 Node 可执行文件、项目目录、配置文件和日志的绝对路径，以及当时的 `PATH`，不依赖登录终端的初始化脚本。plist 权限为 `0600`。更新 Node 后若记录的路径仍有效，无需重新生成；若路径失效，按下文重新生成服务配置。
 
 ### 4. 检查访问与配对
 
 ```sh
 curl --noproxy '*' --fail --show-error http://127.0.0.1:8787/api/v1/health
-curl --noproxy '*' --fail --show-error https://xz-macbookair.tail9ddfa1.ts.net/api/v1/health
+curl --noproxy '*' --fail --show-error https://your-server.your-tailnet.ts.net/api/v1/health
 CODEX_PHONE_CONFIG="$PWD/config.local.json" npm run doctor
 ```
 
@@ -117,7 +117,7 @@ CODEX_PHONE_CONFIG="$PWD/config.local.json" npm run pair
 ### 查看服务和日志
 
 ```sh
-cd /Users/xiezheng/Code/CodexPhoneApp
+cd /absolute/path/to/CodexPhoneApp
 launchctl print gui/$(id -u)/local.codex-phone
 tailscale funnel status
 lsof -nP -iTCP:8787 -sTCP:LISTEN
@@ -125,7 +125,7 @@ tail -n 100 .codex-phone/logs/gateway.out.log
 tail -n 100 .codex-phone/logs/gateway.err.log
 ```
 
-服务应为 `running`，网关只监听 `127.0.0.1:8787`。PID 随自动恢复变化，以 `launchctl print` 为准；`.codex-phone/run/gateway-service.json` 只是托管信息记录，不能代替实时状态检查。日志没有自动轮转。
+服务应为 `running`，网关只监听 `127.0.0.1:8787`。PID 随自动恢复变化，以 `launchctl print` 为准。日志没有自动轮转。
 
 ### 临时停止与恢复
 
@@ -187,8 +187,8 @@ tailscale funnel --https=443 off
 
 更多共享 socket、权限与配对问题见 [部署与维护](DEPLOYMENT.md#诊断)。
 
-## 已完成的验证
+## 部署后验证
 
-2026-10-16 已实测 SIGTERM、SIGKILL 后自动恢复，服务卸载/重新加载成功，局域网监听关闭。公网 HTTPS、TLS 校验、已认证 bootstrap、WSS 连接与心跳均通过，共享 Codex 后端已连接。未认证请求返回 401，临时验收授权已撤销，原有设备授权保留。
+分别检查本机健康接口、公网 HTTPS、TLS 校验、配对后的会话访问与 WSS 实时连接。健康接口成功仅证明网关可响应，不能证明共享后端或手机实时控制可用。
 
-已配置登录启动，但没有实际注销或重启 Mac；服务重新加载验证不等同于真实重启验证。持久证据见 [服务报告](evidence/2026-10-16-funnel-service/service-report.json) 和 [连接报告](evidence/2026-10-16-funnel-service/connection-report.json)。
+如需验证保活，在测试环境中检查进程退出后恢复与服务重新加载；登录启动需另行验证电脑注销或重启后的访问。记录实际完成的步骤及未验证范围，按[验收清单](ACCEPTANCE.md)补齐端到端检查。

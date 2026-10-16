@@ -1,7 +1,0 @@
-{
-  "artifact": "tmp/harmony-phone/entry/build/default/outputs/default/entry-default-signed.hap",
-  "sha256": "349230d41456631e81b5290b17207671887507fca0147d09718c8c271198cdee",
-  "signatureVerified": true,
-  "profileVerified": true,
-  "zipIntegrity": true
-}

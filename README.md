@@ -1,28 +1,61 @@
 # Codex Phone
 
-从手机访问电脑上已有的 Codex 会话。React + TypeScript 网页和 HarmonyOS 原生应用共用 Node.js 网关的 `/api/v1` HTTP 与 WebSocket 接口；网关连接本机或通过 SSH 转发远程机器已有的 Codex control socket。
+从手机查看、继续和控制电脑上的 Codex 会话。
 
-网页提供会话列表、按工作路径浏览和历史、文字与图片输入、流式回复、工具过程、新建和继续会话、运行中追加指令、停止、审批与交互问题，以及项目、模型、推理强度和 Plan 模式选择。电脑端权限策略继续由 Codex 管理。
+Codex Phone 是一个自托管的移动端接入项目，包含响应式网页、HarmonyOS 原生应用和 Node.js 网关。网关连接电脑上**已经运行的 Codex 共享后端**，让你离开电脑后仍能查看任务进度、发送文字或图片、追加指令，以及处理审批。也可以由网关通过 SSH 接入远程开发机。
 
-**接入前提：电脑正在运行的 Codex 必须提供可连接的共享 control socket，并支持所需协议。** 不同 Codex 版本和客户端可能不共享同一个运行后端；能读取历史不代表能控制另一个进程中的运行任务。本项目不会另起独立 app-server 来替代共享接入。共享会话与真机验收方法见 [验收清单](docs/ACCEPTANCE.md)。
+本项目是独立的社区项目，与 OpenAI 无官方隶属关系。
 
-## HarmonyOS 原生应用
+[快速开始](#快速开始) · [使用指南](#使用指南) · [架构与模块](#架构与模块) · [开发与贡献](#开发与贡献) · [文档导航](#文档导航)
 
-HarmonyOS 7 原生客户端位于 [`harmony/`](harmony/README.md)，使用 ArkTS / ArkUI 与同一个网关连接。环境检查运行 `npm run harmony:doctor`，实际 HAP 构建运行 `npm run harmony:build`；构建、模拟器与签名说明见原生目录文档。
+## 功能概览
 
-## 多 Server 与多台机器
+| 场景       | 支持的操作                                                            |
+| ---------- | --------------------------------------------------------------------- |
+| 浏览会话   | 查看历史、搜索标题、按完整工作路径分组、分页加载                      |
+| 继续工作   | 新建或接续会话，发送文字和图片，查看流式回复与工具过程                |
+| 控制任务   | 在运行中追加指令、停止当前任务、响应审批与交互问题                    |
+| 调整会话   | 选择项目、模型、推理强度与 Plan 模式，具体能力取决于后端              |
+| 连接机器   | 接入本机及 SSH 目标；原生应用可保存多个网关，网页切换当前网关下的机器 |
+| 恢复与管理 | 草稿保存、断线后同步、一次性配对、查看及撤销已授权客户端              |
 
-鸿蒙 App 可管理多个 Server，首页按 Server 分组展示本机及 SSH 机器；网页可切换当前 Server 下的机器。SSH 由网关发起，连接各机器已有的 Codex 共享后端。配置、图片传输与兼容说明见 [多 Server 与 SSH 机器配置](docs/MULTI-SERVER.md)。
+**接入前提：Codex 必须提供可连接的共享 control socket，并支持适配器所需协议。** 不同 Codex 版本、Desktop 与 CLI 运行方式可能使用不同后端。能读取历史不代表能控制另一个进程的任务；跨端控制需要按[验收清单](docs/ACCEPTANCE.md)验证。项目处于早期开发阶段，协议兼容范围见[适配器说明](server/codex-protocol.md)。
 
-## 按工作路径浏览
+## 架构与模块
 
-会话列表上方可切换「全部会话」和「工作路径」。选择工作路径后，只显示该目录的会话，可以继续搜索标题、加载更早的会话并打开接续；点击「全部工作路径」可重新选择目录。目录卡片显示完整路径、会话数量和运行中的数量，同名文件夹也能区分。
+```mermaid
+flowchart LR
+    Web[手机或桌面浏览器] -->|HTTP / WebSocket| Gateway[Node.js 网关]
+    App[HarmonyOS 原生应用] -->|HTTP / WebSocket| Gateway
+    Gateway -->|本机 Unix socket| Local[已有 Codex 共享后端]
+    Gateway -->|SSH socket 转发| Remote[远程 Codex 共享后端]
+```
 
-目录按最近会话更新时间排序，统计覆盖历史列表的全部分页，不受新建会话的 `projects` 配置限制。目录按会话记录的完整路径精确分组，父子目录分别显示；新建会话仍只能选择配置允许的项目。
+网关负责配对、设备授权、文件上传和协议转换，通过统一的 `/api/v1` 接口服务两种客户端。会话和任务在 Codex 后端执行，电脑端的权限与审批策略继续生效；网关不会为接入另起独立的 Codex app-server。
 
-## 本机启动
+| 目录                            | 模块与职责                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| [`web/`](web/)                  | React + TypeScript 网页，包含会话浏览、对话界面、设备管理及客户端状态       |
+| [`harmony/`](harmony/README.md) | ArkTS / ArkUI 原生应用，包含原生界面、相册选择、凭据存储与网络连接          |
+| [`server/`](server/)            | Node.js 网关，负责 HTTP/WS、认证、Codex 协议适配、本机及 SSH 目标、图片传输 |
+| [`shared/`](shared/)            | 网页与网关共用的 TypeScript 协议类型；原生应用维护对应的 ArkTS 类型         |
+| [`scripts/`](scripts/)          | 连接诊断、真实后端验收、macOS 服务配置生成及 HarmonyOS 构建工具             |
+| [`tests/`](tests/)              | 网关、协议、网页状态、SSH 传输与原生逻辑的自动测试                          |
+| [`docs/`](docs/)                | 部署、接口、验收和资源说明                                                  |
 
-需要 Node.js 22.13 或更新版本，以及已登录、正在运行的电脑端 Codex。
+一个 **Server（网关）** 是客户端配对的入口；一个 **目标机器** 是网关接入的本机或 SSH 开发机。设备授权属于网关，会话、模型和上传图片按目标机器隔离。已配对客户端可访问该网关配置的全部目标，适合个人设备使用。
+
+## 快速开始
+
+### 1. 准备环境
+
+- Node.js **22.13 或更新版本**，以及 npm；使用 nvm 时可运行 `nvm install && nvm use`。
+- 已登录并运行的 Codex，以及当前用户可访问的共享 control socket。默认路径为 `~/.codex/app-server-control/app-server-control.sock`；自定义路径通过 `socketPath` 配置。
+- 网关及目标机器使用支持 Unix socket 的环境，主要面向 macOS / Linux。HarmonyOS 客户端构建另需 DevEco Studio，见[原生工程说明](harmony/README.md)。
+
+### 2. 安装与启动网关
+
+克隆仓库并进入项目根目录后运行：
 
 ```sh
 npm ci
@@ -32,90 +65,92 @@ npm run doctor
 npm start
 ```
 
-配置复制命令会保留已有 `config.local.json`。仓库提供默认本机模板 `config.example.json` 和 Funnel 模板 `config.funnel.example.json`；后者需要替换实际域名。开发环境、文件管理与 CI 说明见 [开发说明](CONTRIBUTING.md)。
+`config.local.json` 是不进入 Git 的本机配置。默认项目目录为当前仓库，可修改 `projects` 指向需要新建会话的项目。路径相对于运行命令的工作目录解析，建议自定义配置使用绝对路径。
 
-另开终端生成一次性配对二维码：
+`doctor` 进行配置、构建和共享后端的只读连接检查；出现错误时先按[故障排查](docs/DEPLOYMENT.md#诊断)处理。网关直接使用 `tsx` 运行 TypeScript，安装时需要包含开发依赖。`npm start` 在前台运行，请保持终端打开。
+
+### 3. 配对客户端
+
+另开终端，在项目根目录运行：
 
 ```sh
 npm run pair
 ```
 
-默认入口 `http://127.0.0.1:8787` 只能在这台电脑访问。配对凭据有效期 5 分钟，只能使用一次；设备登录有效期 30 天。手机使用前请按下面选择局域网或 Funnel 入口。
+在浏览器打开输出的配对链接，或在原生应用中填入网关地址与一次性凭据。凭据 **5 分钟内一次有效**，设备登录有效期为 **30 天**。
 
-本机当前公网入口（2026-10-16）为 [https://xz-macbookair.tail9ddfa1.ts.net](https://xz-macbookair.tail9ddfa1.ts.net)。本机部署只保留监听 `127.0.0.1:8787` 的 Funnel 网关，由 macOS LaunchAgent 在用户登录后启动并持续保活，局域网网关停用。Tailscale 使用已有的登录启动配置；Codex 由用户手动打开，网关会自动重连共享后端。安装、启停、更新和排查步骤见 [本机 Funnel 网关配置与维护](docs/FUNNEL-SERVICE.md)。此前已通过公网 HTTPS 健康检查与 TLS 验证，HarmonyOS 原生客户端已在实体手机完成该域名的 HTTPS 配对、WSS 连接与真实对话；手机蜂窝网络切换仍待验收。
+默认地址 `http://127.0.0.1:8787` 仅用于网关所在电脑。手机连接前，需要按下面的使用指南配置可访问的入口，再重新生成配对凭据。
 
-`doctor` 只检查配置、构建产物、Codex 版本和共享 socket 握手/列表查询，不创建或继续任务，不修改系统设置。失败时先处理它给出的具体连接原因。
+## 使用指南
 
-## 手机入口
+### 选择访问方式
 
-项目根目录的 `config.local.json` 为本机配置，不要提交到 Git。也可用 `CODEX_PHONE_CONFIG=/绝对路径/config.json` 指定配置；启动、配对及设备管理命令须使用同一配置。
+| 访问方式       | 配置要点                                                                 | 适用场景                 |
+| -------------- | ------------------------------------------------------------------------ | ------------------------ |
+| 本机           | 默认配置，访问 `127.0.0.1:8787`                                          | 首次验证和桌面浏览器使用 |
+| 局域网         | `host` 设为电脑局域网 IP，`publicUrl` 设为手机实际访问的地址             | 同一可信网络内使用       |
+| HTTPS 公网入口 | 网关监听回环地址，由 Tailscale Funnel 提供 HTTPS；`publicUrl` 填实际域名 | 在外访问自己的电脑       |
 
-局域网示例（将地址和项目目录替换为本机实际值）：
+局域网示例，将 IP 和项目路径替换为实际值：
 
 ```json
 {
   "host": "192.168.1.20",
   "port": 8787,
   "publicUrl": "http://192.168.1.20:8787",
-  "projects": [{ "name": "我的项目", "path": "/Users/me/Code/my-project" }]
+  "projects": [{ "name": "我的项目", "path": "/absolute/path/to/project" }]
 }
 ```
 
-手机和电脑接入同一网络，重启网关，再运行 `npm run pair` 并用手机扫码。局域网 HTTP 适合可信网络上的初次验证；长期使用请配置手机信任的 HTTPS 证书，步骤见 [部署说明](docs/DEPLOYMENT.md)。
+修改配置后重启网关，手机接入同一网络并使用新配对链接。HTTP 仅适合可信网络的初次验证；长期使用请配置手机信任的 HTTPS。Funnel 可参考 [`config.funnel.example.json`](config.funnel.example.json)。完整步骤见[部署与维护](docs/DEPLOYMENT.md)和[Funnel 服务指南](docs/FUNNEL-SERVICE.md)。
 
-Funnel 模式保持 `host` 为 `127.0.0.1`，启动网关后在电脑终端运行：
+使用其他配置文件时设置 `CODEX_PHONE_CONFIG=/absolute/path/to/config.json`，启动、配对和设备管理命令应使用同一配置。
 
-```sh
-tailscale funnel --bg 8787
-tailscale funnel status
-```
+### 浏览和操作会话
 
-把输出中的 `https://电脑名称.网络名称.ts.net` 设置为配置的 `publicUrl`，重启网关，再运行 `npm run pair`。Funnel 将网关端口通过 HTTPS 提供给公网，访问会话仍需要配对。官方命令及前提见 [Tailscale Funnel 文档](https://tailscale.com/docs/reference/tailscale-cli/funnel)。
+1. 选择网关与目标机器。网页使用当前网关；原生应用可添加、命名及管理多个网关。
+2. 在「全部会话」中搜索，或按「工作路径」进入目录，再打开会话。路径按完整目录精确分组，父子目录分别展示。
+3. 输入文字或附加图片。任务空闲时发送会启动新轮次，运行时发送会追加到当前轮次；需要结束任务时点击停止。
+4. 新建会话时选择配置允许的项目，并按后端能力选择模型、推理强度和 Plan 模式；出现审批或问题时，在会话中处理。
 
-## 设备与运行管理
+配置中的 `projects` 限制新建会话的目录选择，不限制已有历史的可见范围。添加远程机器所需的 SSH、socket 与图片目录配置见[连接配置](docs/MULTI-SERVER.md)。
+
+### 管理设备与恢复连接
 
 ```sh
 npm run devices
-npm run revoke -- 设备ID
+npm run revoke -- <设备ID>
 ```
 
-客户端列表按同一 App 安装或同一浏览器站点实例识别，重复配对复用记录，并显示客户端类型、首次配对和最近使用时间。原生 App 的局域网与 Funnel 授权可归入同一记录；浏览器不同来源分别识别。旧记录会在原客户端访问后迁移，无法确认来源的历史记录标为「旧版授权」，可逐项撤销。撤销或退出一个客户端会使其全部入口授权及现有连接失效。前台网关按 `Ctrl+C` 停止；手机断开或网关停止不等同于停止正在电脑端运行的 Codex 任务，需要时先在对话中点击停止。
+同一 App 安装或同一浏览器站点实例重复配对会复用客户端记录。撤销或退出客户端会使其全部入口授权和现有连接失效。
 
-生成 macOS 登录启动配置：
+手机断线、退出应用或停止网关，不等于停止 Codex 任务。恢复连接后，客户端会重新同步会话；若发送后断线且结果未确认，先核对历史再决定是否重发。macOS 登录启动及服务启停见[服务维护](docs/FUNNEL-SERVICE.md)。
 
-```sh
-node --import tsx scripts/launch-agent.ts
-```
-
-默认仅输出 plist 供检查。使用 `--install` 会将 `local.codex-phone.plist` 保存到当前用户的 LaunchAgents 目录，但不会加载服务。加载后网关正常退出或异常退出都会重新启动；主动停止请使用 `launchctl bootout`，不能仅结束进程。具体启停和永久停用命令见 [部署说明](docs/DEPLOYMENT.md)。服务随当前用户登录启动，不提供开机未登录时的访问；本项目不会自动开启 Funnel、启动 Codex 或修改全局 Codex 配置。
-
-## 开发与验证
-
-截至 2026-10-16，本分支 152 项自动测试（网页/网关 118 项、原生客户端 34 项）、构建及真实后端诊断通过；另已验证双连接、网页文字/图片与追加/停止、运行中网关重启恢复、显式会话设置、共享 socket 交互式 CLI 接续、文件变更审批和 Funnel 公网 HTTPS。新增本机与 SSH 双机器的文字、图片、追加/停止、审批、隔离和图片重启恢复，见 [多 Server 验收记录](docs/evidence/2026-10-16-multi-server/REAL-ACCEPTANCE.md)。完整网页测试使用本机 Chromium 移动视口；独立 `codex exec resume` 路径、网页在实体手机上的完整操作和蜂窝网络下的公网 WSS 流程仍未通过全部验收，整体保持部分验收。原生手机的安装、配对、真实对话和重启恢复见 [HarmonyOS 验收](docs/HARMONYOS-ACCEPTANCE.md)。持久证据与剩余项目见 [验收记录](docs/ACCEPTANCE.md)。
-
-代码统一使用 Prettier 格式化；提交前运行完整检查，依次验证格式、自动测试和生产构建：
+## 开发与贡献
 
 ```sh
-npm run format
 npm run check
 ```
 
-也可以单独执行 `npm run format:check`、`npm test` 或 `npm run build`。本机配置、设备认证、上传图片、临时验收目录和构建产物均不进入 Git；`docs/evidence` 保留已核验的原始证据，不参与自动格式化。
+该命令依次执行格式检查、隔离自动测试、TypeScript 检查和网页生产构建，无需连接真实 Codex 或手机。
 
-在可访问电脑现有共享后端的终端执行真实后端自动检查：
+网页开发时，在两个终端分别运行 `npm run dev` 和 `npm run web:dev`，将 `http://127.0.0.1:5173` 加入本机配置的 `allowedOrigins`，重启网关后使用 `npm run pair -- --url http://127.0.0.1:5173` 配对。
 
-```sh
-npm run test:live -- --run
-```
+原生应用使用 `npm run harmony:doctor` 检查工具链，使用 `npm run harmony:build` 构建。贡献流程、文件约定和 CI 说明见 [CONTRIBUTING.md](CONTRIBUTING.md)；真实后端与手机的验证方法见[验收清单](docs/ACCEPTANCE.md)。
 
-不带 `--run` 时仅显示说明。连接成功后，脚本只操作本次新建的隔离测试会话，检查文字、第二连接实时事件、运行中追加与停止；测试会请求执行一次 `/bin/sleep 20`。报告保存到 `tmp/live-acceptance/report-*.json`。共享 socket 被 `EPERM` 阻止时记为 `blocked`，不算通过；Desktop/CLI 同步、审批和真机局域网/Funnel 仍按 [验收清单](docs/ACCEPTANCE.md) 人工确认。
+## 文档导航
 
-前端开发可同时运行 `npm run dev` 和 `npm run web:dev`，并在配置的 `allowedOrigins` 中加入 `http://127.0.0.1:5173`，使用 `npm run pair -- --url http://127.0.0.1:5173` 配对。日常手机访问使用 `npm run build` 后由网关统一提供网页。
+| 文档                                                                      | 内容                                              |
+| ------------------------------------------------------------------------- | ------------------------------------------------- |
+| [部署与维护](docs/DEPLOYMENT.md)                                          | 配置项、局域网、HTTPS、登录启动与故障排查         |
+| [Funnel 服务指南](docs/FUNNEL-SERVICE.md)                                 | macOS 上的 Funnel 与 LaunchAgent 安装、更新、启停 |
+| [连接配置](docs/MULTI-SERVER.md)                                          | 多网关、SSH 目标与远程图片传输                    |
+| [HarmonyOS 工程](harmony/README.md)                                       | 原生客户端、工具链、构建与签名                    |
+| [网关 API](docs/API.md)                                                   | 认证、HTTP、WebSocket、事件和重连约定             |
+| [Codex 协议适配](server/codex-protocol.md)                                | 后端协议基线、兼容逻辑与能力边界                  |
+| [验收清单](docs/ACCEPTANCE.md) / [原生验收](docs/HARMONYOS-ACCEPTANCE.md) | 可复现的验证步骤及通过标准                        |
+| [安全说明](SECURITY.md)                                                   | 信任边界、敏感数据与问题报告                      |
 
-- [本机 Funnel 网关配置与维护](docs/FUNNEL-SERVICE.md)
-- [多 Server 与 SSH 机器配置](docs/MULTI-SERVER.md)
-- [部署、HTTPS、故障排查](docs/DEPLOYMENT.md)
-- [接口与重连约定](docs/API.md)
-- [真实共享后端与手机验收](docs/ACCEPTANCE.md)
+## 许可证
 
-Codex 适配器根据本机协议隔离版本差异；官方接口参考 [Codex App Server](https://learn.chatgpt.com/docs/app-server)。官方将 WebSocket transport 标注为实验性能力，升级 Codex 后应重新运行诊断与共享后端验收。
+项目原创代码和文档采用 [MIT License](LICENSE)。第三方依赖及品牌标识的说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
