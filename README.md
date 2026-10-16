@@ -1,6 +1,6 @@
 # Codex Phone
 
-从手机浏览器访问电脑上已有的 Codex 会话。第一阶段为移动端网页，React + TypeScript 前端通过本地 Node.js 网关连接同一台电脑的 Codex app-server control socket。HarmonyOS 原生手机应用与网页共用 `/api/v1` HTTP 与 WebSocket 接口。
+从手机访问电脑上已有的 Codex 会话。React + TypeScript 网页和 HarmonyOS 原生应用共用 Node.js 网关的 `/api/v1` HTTP 与 WebSocket 接口；网关连接本机或通过 SSH 转发远程机器已有的 Codex control socket。
 
 网页提供会话列表、按工作路径浏览和历史、文字与图片输入、流式回复、工具过程、新建和继续会话、运行中追加指令、停止、审批与交互问题，以及项目、模型、推理强度和 Plan 模式选择。电脑端权限策略继续由 Codex 管理。
 
@@ -9,6 +9,10 @@
 ## HarmonyOS 原生应用
 
 HarmonyOS 7 原生客户端位于 [`harmony/`](harmony/README.md)，使用 ArkTS / ArkUI 与同一个网关连接。环境检查运行 `npm run harmony:doctor`，实际 HAP 构建运行 `npm run harmony:build`；构建、模拟器与签名说明见原生目录文档。
+
+## 多 Server 与多台机器
+
+鸿蒙 App 可管理多个 Server，首页按 Server 分组展示本机及 SSH 机器；网页可切换当前 Server 下的机器。SSH 由网关发起，连接各机器已有的 Codex 共享后端。配置、图片传输与兼容说明见 [多 Server 与 SSH 机器配置](docs/MULTI-SERVER.md)。
 
 ## 按工作路径浏览
 
@@ -84,7 +88,7 @@ node --import tsx scripts/launch-agent.ts
 
 ## 开发与验证
 
-截至 2026-10-16，本分支 114 项自动测试（网页/网关 89 项、原生客户端 25 项）、构建及真实后端诊断通过；另已验证双连接、网页文字/图片与追加/停止、运行中网关重启恢复、显式会话设置、共享 socket 交互式 CLI 接续、文件变更审批和 Funnel 公网 HTTPS。完整网页测试使用本机 Chromium 移动视口；独立 `codex exec resume` 路径、网页在实体手机上的完整操作和蜂窝网络下的公网 WSS 流程仍未通过全部验收，整体保持部分验收。原生手机的安装、配对、真实对话和重启恢复见 [HarmonyOS 验收](docs/HARMONYOS-ACCEPTANCE.md)。持久证据与剩余项目见 [验收记录](docs/ACCEPTANCE.md)。
+截至 2026-10-16，本分支 152 项自动测试（网页/网关 118 项、原生客户端 34 项）、构建及真实后端诊断通过；另已验证双连接、网页文字/图片与追加/停止、运行中网关重启恢复、显式会话设置、共享 socket 交互式 CLI 接续、文件变更审批和 Funnel 公网 HTTPS。新增本机与 SSH 双机器的文字、图片、追加/停止、审批、隔离和图片重启恢复，见 [多 Server 验收记录](docs/evidence/2026-10-16-multi-server/REAL-ACCEPTANCE.md)。完整网页测试使用本机 Chromium 移动视口；独立 `codex exec resume` 路径、网页在实体手机上的完整操作和蜂窝网络下的公网 WSS 流程仍未通过全部验收，整体保持部分验收。原生手机的安装、配对、真实对话和重启恢复见 [HarmonyOS 验收](docs/HARMONYOS-ACCEPTANCE.md)。持久证据与剩余项目见 [验收记录](docs/ACCEPTANCE.md)。
 
 代码统一使用 Prettier 格式化；提交前运行完整检查，依次验证格式、自动测试和生产构建：
 
@@ -106,6 +110,7 @@ npm run test:live -- --run
 前端开发可同时运行 `npm run dev` 和 `npm run web:dev`，并在配置的 `allowedOrigins` 中加入 `http://127.0.0.1:5173`，使用 `npm run pair -- --url http://127.0.0.1:5173` 配对。日常手机访问使用 `npm run build` 后由网关统一提供网页。
 
 - [本机 Funnel 网关配置与维护](docs/FUNNEL-SERVICE.md)
+- [多 Server 与 SSH 机器配置](docs/MULTI-SERVER.md)
 - [部署、HTTPS、故障排查](docs/DEPLOYMENT.md)
 - [接口与重连约定](docs/API.md)
 - [真实共享后端与手机验收](docs/ACCEPTANCE.md)

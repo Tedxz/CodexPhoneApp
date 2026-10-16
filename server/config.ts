@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve, basename, join } from 'node:path';
+import { resolve, basename, join, posix } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Project } from '../shared/protocol.js';
 
@@ -13,6 +13,69 @@ export interface Config {
   socketPath: string;
   dataDir: string;
   tls?: { cert: string; key: string };
+  sshTargets?: SshTargetConfig[];
+}
+export interface SshTargetConfig {
+  id: string;
+  name: string;
+  sshHost: string;
+  socketPath: string;
+  projects: Project[];
+  /** A dedicated remote directory. Omit to disable remote image uploads. */
+  uploadDir?: string;
+}
+export function remotePath(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.startsWith('/') || /[\0\r\n]/.test(value))
+    throw new Error(`${label}必须为无控制字符的远端绝对路径`);
+  return posix.normalize(value);
+}
+function sshTargets(value: unknown): SshTargetConfig[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('sshTargets 必须为数组');
+  const ids = new Set(['local']);
+  return value.map((entry: unknown) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+      throw new Error('SSH 机器配置必须为对象');
+    const target = entry as Record<string, unknown>;
+    const id = target.id;
+    if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id) || ids.has(id))
+      throw new Error('SSH 机器 ID 必须唯一、不能为 local，且仅包含小写字母、数字、短横线和下划线');
+    ids.add(id);
+    if (typeof target.name !== 'string' || !target.name.trim() || target.name.length > 80)
+      throw new Error(`SSH 机器 ${id} 需要 80 字以内的名称`);
+    if (
+      typeof target.sshHost !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(target.sshHost)
+    )
+      throw new Error(`SSH 机器 ${id} 需要有效的 SSH Host 别名`);
+    const socketPath = remotePath(target.socketPath, `${id} socketPath`);
+    if (socketPath.includes(':')) throw new Error('SSH socketPath 不能包含冒号');
+    if (!Array.isArray(target.projects)) throw new Error(`SSH 机器 ${id} 的 projects 必须为数组`);
+    const projects = target.projects.map((raw: unknown) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        throw new Error('远端项目必须为对象');
+      const entry = raw as Record<string, unknown>;
+      const path = remotePath(entry.path, '远端项目路径');
+      if (entry.name !== undefined && (typeof entry.name !== 'string' || !entry.name.trim()))
+        throw new Error('远端项目名称必须为非空字符串');
+      return {
+        id: createHash('sha256').update(path).digest('hex').slice(0, 16),
+        name: typeof entry.name === 'string' ? entry.name.trim() : posix.basename(path) || '/',
+        path,
+      };
+    });
+    const uploadDir =
+      target.uploadDir === undefined ? undefined : remotePath(target.uploadDir, '远端图片目录');
+    if (uploadDir === '/') throw new Error('远端图片目录必须为专用目录，不能为根目录');
+    return {
+      id,
+      name: target.name.trim(),
+      sshHost: target.sshHost,
+      socketPath,
+      projects,
+      uploadDir,
+    };
+  });
 }
 function origin(value: string): string {
   const url = new URL(value);
@@ -62,6 +125,7 @@ export function loadConfig(
     publicUrl,
     allowedOrigins,
     projects,
+    sshTargets: sshTargets(raw.sshTargets),
     socketPath: resolve(
       raw.socketPath ??
         join(

@@ -119,6 +119,8 @@ export interface ConnectionState {
   message: string;
   serverVersion?: string;
   sharedBackend: boolean;
+  stage?: string;
+  errorCode?: string;
 }
 
 export interface Capabilities {
@@ -191,3 +193,13 @@ export interface ErrorReply {
   error?: ErrorDetail;
   message?: string;
 }
+
+export interface TargetSummary {
+  id: string;
+  name: string;
+  kind: 'local' | 'ssh';
+  connection: ConnectionState;
+  capabilities: Capabilities;
+}
+
+export interface TargetPage { data: TargetSummary[] }

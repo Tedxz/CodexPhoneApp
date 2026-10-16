@@ -4,12 +4,29 @@ import type {
   Device,
   ModelOption,
   SessionSettings,
+  TargetSummary,
   ThreadSnapshot,
   ThreadSummary,
   WorkspaceSummary,
 } from '../shared/protocol';
 import { api, ApiError, LiveClient } from './api';
-import { applyEvent, describeError, readDraft, storeDraft, SnapshotTracker } from './state';
+import {
+  applyEvent,
+  describeError,
+  readDraft,
+  storeDraft,
+  SnapshotTracker,
+  safeImageUrl,
+} from './state';
+import {
+  loadTargetDirectory,
+  readSelectedTarget,
+  storeSelectedTarget,
+  StaleTargetRequest,
+  TargetRequestScope,
+  targetPath,
+  type TargetDirectory,
+} from './targets';
 import { Icon, Message, ModelControls, RequestCard } from './components';
 import { ThreadBrowser } from './ThreadBrowser';
 import { updateVisibleThreads } from './thread-browser';
@@ -48,11 +65,151 @@ const statusLabel = (thread: ThreadSummary) =>
   ];
 
 export function App() {
+  const [directory, setDirectory] = useState<TargetDirectory | null>(null);
+  const [targetId, setTargetId] = useState(readSelectedTarget);
+  const [directoryError, setDirectoryError] = useState('');
+  const requestVersion = useRef(0);
+  const attachmentStore = useRef(new Map<string, Map<string, Attachment[]>>());
+  const refreshDirectory = useCallback(async () => {
+    const version = ++requestVersion.current;
+    try {
+      const next = await loadTargetDirectory();
+      if (version !== requestVersion.current) return;
+      setDirectory(next);
+      setDirectoryError('');
+    } catch (error) {
+      if (version !== requestVersion.current) return;
+      if (error instanceof ApiError && error.status === 401) {
+        // No machine request is made before login. Discovery runs again after pairing.
+        setDirectory((current) => current || { targets: [], legacy: true });
+      } else setDirectoryError(describeError(error));
+    }
+  }, []);
+  useEffect(() => {
+    void refreshDirectory();
+    const visible = () => {
+      if (document.visibilityState === 'visible') void refreshDirectory();
+    };
+    const timer = setInterval(visible, 10000);
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      requestVersion.current++;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [refreshDirectory]);
+  const chooseTarget = (id: string) => {
+    storeSelectedTarget(id);
+    setTargetId(id);
+  };
+  const selectedTarget = directory?.targets.find((target) => target.id === targetId);
+  if (!directory || (directory.targets.length > 0 && !selectedTarget))
+    return (
+      <main className="pair-shell">
+        <section className="pair-card">
+          <h2>{directory ? '机器配置已变更' : '连接你的机器'}</h2>
+          <p role="status">
+            {directoryError ||
+              (directory
+                ? '上次使用的机器已不在当前网关配置中，请选择另一台机器。'
+                : '正在读取机器列表…')}
+          </p>
+          {directory && (
+            <TargetPicker targets={directory.targets} targetId="" onChange={chooseTarget} />
+          )}
+          <button className="secondary" onClick={() => void refreshDirectory()}>
+            重新读取机器列表
+          </button>
+        </section>
+      </main>
+    );
+  const currentId = directory.targets.length ? targetId : 'local';
+  if (!attachmentStore.current.has(currentId)) attachmentStore.current.set(currentId, new Map());
+  return (
+    <TargetWorkspace
+      key={`${directory.legacy ? 'legacy' : 'targets'}:${currentId}`}
+      targetId={currentId}
+      legacy={directory.legacy}
+      targets={directory.targets}
+      directoryError={directoryError}
+      onChooseTarget={chooseTarget}
+      onRefreshTargets={refreshDirectory}
+      attachmentsByThread={attachmentStore.current.get(currentId)!}
+    />
+  );
+}
+
+function TargetPicker({
+  targets,
+  targetId,
+  onChange,
+}: {
+  targets: TargetSummary[];
+  targetId: string;
+  onChange(id: string): void;
+}) {
+  const target = targets.find((item) => item.id === targetId);
+  return (
+    <label className="target-picker">
+      <span>Codex 机器</span>
+      <select
+        aria-label="选择 Codex 机器"
+        value={targetId}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {!targetId && (
+          <option value="" disabled>
+            选择一台机器
+          </option>
+        )}
+        {targets.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.name} · {item.kind === 'ssh' ? 'SSH' : '本机'} ·{' '}
+            {item.connection.connected ? '已连接' : item.connection.message}
+          </option>
+        ))}
+      </select>
+      {target && (
+        <small title={target.connection.message}>
+          <span
+            className={`connection-dot ${target.connection.connected ? 'connected' : 'offline'}`}
+          />{' '}
+          {target.connection.message}
+        </small>
+      )}
+    </label>
+  );
+}
+
+function TargetWorkspace({
+  targetId,
+  legacy,
+  targets,
+  directoryError,
+  onChooseTarget,
+  onRefreshTargets,
+  attachmentsByThread,
+}: {
+  targetId: string;
+  legacy: boolean;
+  targets: TargetSummary[];
+  directoryError: string;
+  onChooseTarget(id: string): void;
+  onRefreshTargets(): Promise<void>;
+  attachmentsByThread: Map<string, Attachment[]>;
+}) {
+  const [targetScope] = useState(() => new TargetRequestScope(targetId, legacy));
+  const targetApi = useCallback(
+    <T,>(path: string, options?: RequestInit) => targetScope.fetch<T>(path, options),
+    [targetScope],
+  );
+  const targetName = targets.find((target) => target.id === targetId)?.name || '本机';
   const authRevision = useRef(0);
   const refreshTask = useRef<Promise<void> | null>(null);
   const refreshAgain = useRef(false);
   const [boot, setBoot] = useState<Bootstrap | null>(null);
   const [checked, setChecked] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [browserIdentity] = useState(readBrowserIdentity);
@@ -71,7 +228,7 @@ export function App() {
   const [settings, setSettings] = useState<SessionSettings>({});
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const attachmentDrafts = useRef(new Map<string, Attachment[]>());
+  const attachmentDrafts = useRef(attachmentsByThread);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
@@ -109,15 +266,35 @@ export function App() {
   const nearBottom = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
   const ready = live && !!boot?.connection.connected;
-  const setFailure = (e: unknown) => setError(describeError(e));
-  const clearSession = useCallback(() => {
+  const setFailure = (e: unknown) => {
+    if (!(e instanceof StaleTargetRequest)) setError(describeError(e));
+  };
+  const invalidateWorkspace = useCallback(() => {
     authRevision.current++;
+    loadListVersion.current++;
+    targetScope.invalidate();
+    client.current?.close();
+    client.current = null;
+  }, [targetScope]);
+  useEffect(() => () => invalidateWorkspace(), [invalidateWorkspace]);
+  const chooseTarget = (id: string) => {
+    if (id === targetId) return;
+    if (selected.current) {
+      storeDraft(selected.current, draft, targetId);
+      attachmentDrafts.current.set(selected.current, attachments);
+    }
+    invalidateWorkspace();
+    onChooseTarget(id);
+  };
+  const clearSession = useCallback(() => {
+    invalidateWorkspace();
     refreshTask.current = null;
     refreshAgain.current = false;
     loadListVersion.current++;
     selected.current = null;
     commitSnapshot(null);
     setBoot(null);
+    setAuthRequired(true);
     setLive(false);
     setThreads([]);
     setNextThreads(null);
@@ -135,15 +312,16 @@ export function App() {
     setUploading(false);
     setOlderBusy(false);
     setCreating(false);
-  }, [commitSnapshot]);
+  }, [commitSnapshot, invalidateWorkspace]);
 
   const syncSnapshot = useCallback(async () => {
     const id = selected.current;
+    const revision = authRevision.current;
     if (!id || !client.current) return;
     const incoming = await client.current.command<ThreadSnapshot>('thread.subscribe', {
       threadId: id,
     });
-    if (selected.current !== id) return;
+    if (selected.current !== id || revision !== authRevision.current) return;
     commitSnapshot((current) => tracker.current.reconcile(current, incoming));
   }, [commitSnapshot]);
   const loadThreads = useCallback(
@@ -154,14 +332,14 @@ export function App() {
       setListError('');
       try {
         if (query.mode === 'workspaces' && query.workspace === null) {
-          const result = await api<{ data: WorkspaceSummary[] }>('/workspaces');
+          const result = await targetApi<{ data: WorkspaceSummary[] }>('/workspaces');
           if (version === loadListVersion.current) setWorkspaces(result.data);
         } else {
           const params = new URLSearchParams({ search: query.search.trim().slice(0, 200) });
           if (query.mode === 'workspaces' && query.workspace !== null)
             params.set('cwd', query.workspace);
           if (cursor) params.set('cursor', cursor);
-          const result = await api<{ data: ThreadSummary[]; nextCursor: string | null }>(
+          const result = await targetApi<{ data: ThreadSummary[]; nextCursor: string | null }>(
             `/threads?${params}`,
           );
           if (version !== loadListVersion.current) return;
@@ -180,7 +358,7 @@ export function App() {
         if (version === loadListVersion.current) setListBusy(false);
       }
     },
-    [clearSession],
+    [clearSession, targetApi],
   );
   const changeBrowser = (next: BrowserQuery) => {
     const previous = browserQueryRef.current;
@@ -215,14 +393,14 @@ export function App() {
       }
       const revision = authRevision.current;
       const pending = (async () => {
-        const state = await api<Bootstrap>('/bootstrap');
+        const state = await targetApi<Bootstrap>('/bootstrap');
         if (revision !== authRevision.current) return;
         setBoot(state);
         if (state.connection.connected) {
           const results = await Promise.allSettled([
             loadThreads(),
             syncSnapshot(),
-            api<{ data: ModelOption[] }>('/models').then((x) => {
+            targetApi<{ data: ModelOption[] }>('/models').then((x) => {
               if (revision === authRevision.current) setModels(x.data);
             }),
           ]);
@@ -245,11 +423,11 @@ export function App() {
         .catch(() => {});
       return pending;
     },
-    [loadThreads, syncSnapshot],
+    [loadThreads, syncSnapshot, targetApi],
   );
   useEffect(() => {
     let active = true;
-    api<Bootstrap>('/bootstrap')
+    targetApi<Bootstrap>('/bootstrap')
       .then((state) => identifyBrowserSession(state, browserIdentity))
       .then((result) => {
         if (!active) return;
@@ -257,7 +435,9 @@ export function App() {
         setIdentityNotice(result.notice);
       })
       .catch((e) => {
-        if (active && (!(e instanceof ApiError) || e.status !== 401)) setFailure(e);
+        if (!active) return;
+        if (e instanceof ApiError && e.status === 401) setAuthRequired(true);
+        else setFailure(e);
       })
       .finally(() => {
         if (active) setChecked(true);
@@ -265,52 +445,60 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [browserIdentity]);
+  }, [browserIdentity, targetApi]);
   useEffect(() => {
     if (!boot?.device.id) return;
     let workspaceRefresh: ReturnType<typeof setTimeout> | undefined;
     tracker.current.reset();
-    const connection = new LiveClient({
-      status: (connected) => setLive(connected),
-      unauthorized: () => {
-        clearSession();
-        setNotice('设备登录已失效，请重新配对。');
-      },
-      resync: () => {
-        void refresh().catch((e) => {
-          if (e instanceof ApiError && e.status === 401) clearSession();
-          else setFailure(e);
-        });
-      },
-      event: (envelope) => {
-        tracker.current.record(envelope);
-        const event = envelope.event;
-        if (event.type === 'connection')
-          setBoot((current) => (current ? { ...current, connection: event.connection } : current));
-        if (event.type === 'thread.changed') {
-          setThreads((current) =>
-            updateVisibleThreads(current, event.thread, browserQueryRef.current),
-          );
-          const query = browserQueryRef.current;
-          if (query.mode === 'workspaces' && query.workspace === null && !workspaceRefresh) {
-            workspaceRefresh = setTimeout(() => {
-              workspaceRefresh = undefined;
-              const latest = browserQueryRef.current;
-              if (latest.mode === 'workspaces' && latest.workspace === null) void loadThreads();
-            }, 1500);
+    const connection = new LiveClient(
+      {
+        status: (connected) => setLive(connected),
+        unauthorized: () => {
+          clearSession();
+          setNotice('设备登录已失效，请重新配对。');
+        },
+        resync: () => {
+          void refresh().catch((e) => {
+            if (e instanceof ApiError && e.status === 401) clearSession();
+            else setFailure(e);
+          });
+        },
+        event: (envelope) => {
+          tracker.current.record(envelope);
+          const event = envelope.event;
+          if (event.type === 'connection') {
+            setBoot((current) =>
+              current ? { ...current, connection: event.connection } : current,
+            );
+            if (event.connection.connected) void refresh().catch(setFailure);
           }
-        }
-        if (event.type === 'resync') {
-          void refresh().catch(setFailure);
-          return;
-        }
-        commitSnapshot((current) =>
-          current?.eventCursor?.epoch === envelope.epoch && envelope.seq <= current.eventCursor.seq
-            ? current
-            : applyEvent(current, event),
-        );
+          if (event.type === 'thread.changed') {
+            setThreads((current) =>
+              updateVisibleThreads(current, event.thread, browserQueryRef.current),
+            );
+            const query = browserQueryRef.current;
+            if (query.mode === 'workspaces' && query.workspace === null && !workspaceRefresh) {
+              workspaceRefresh = setTimeout(() => {
+                workspaceRefresh = undefined;
+                const latest = browserQueryRef.current;
+                if (latest.mode === 'workspaces' && latest.workspace === null) void loadThreads();
+              }, 1500);
+            }
+          }
+          if (event.type === 'resync') {
+            void refresh().catch(setFailure);
+            return;
+          }
+          commitSnapshot((current) =>
+            current?.eventCursor?.epoch === envelope.epoch &&
+            envelope.seq <= current.eventCursor.seq
+              ? current
+              : applyEvent(current, event),
+          );
+        },
       },
-    });
+      targetPath(targetId, '', legacy),
+    );
     client.current = connection;
     connection.connect();
     const visible = () => {
@@ -323,7 +511,7 @@ export function App() {
       if (client.current === connection) client.current = null;
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [boot?.device.id, refresh, commitSnapshot, clearSession, loadThreads]);
+  }, [boot?.device.id, refresh, commitSnapshot, clearSession, loadThreads, targetId, legacy]);
   const threadSearch =
     browserQuery.mode === 'workspaces' && browserQuery.workspace === null
       ? ''
@@ -398,7 +586,7 @@ export function App() {
     setMobileChat(true);
     setError('');
     setNotice('');
-    setDraft(readDraft(id));
+    setDraft(readDraft(id, targetId));
     setAttachments(attachmentDrafts.current.get(id) || []);
     nearBottom.current = true;
     try {
@@ -425,12 +613,13 @@ export function App() {
       });
       setPairToken('');
       const result = await identifyBrowserSession(
-        await api<Bootstrap>('/bootstrap'),
+        await targetApi<Bootstrap>('/bootstrap'),
         browserIdentity,
       );
       setBoot(result.bootstrap);
       setIdentityNotice(result.notice);
       setNotice('');
+      await onRefreshTargets();
     } catch (e) {
       setFailure(e);
     } finally {
@@ -474,6 +663,7 @@ export function App() {
     event.preventDefault();
     if (!snapshot || !client.current || sending || uploading) return;
     const id = snapshot.thread.id;
+    const revision = authRevision.current;
     const text = draft;
     const images = attachments;
     setSending(true);
@@ -488,7 +678,8 @@ export function App() {
           ? { expectedTurnId: snapshot.thread.activeTurnId }
           : settings),
       });
-      storeDraft(id, '');
+      if (revision !== authRevision.current) return;
+      storeDraft(id, '', targetId);
       attachmentDrafts.current.delete(id);
       if (selected.current === id) {
         setDraft('');
@@ -518,12 +709,13 @@ export function App() {
           file.size > 10 * 1024 * 1024
         )
           throw new Error('请选择 10 MB 以内的 PNG、JPEG 或 WebP 图片。');
-        const image = await api<{ id: string; url: string }>('/uploads', {
+        const image = await targetApi<{ id: string; url: string }>('/uploads', {
           method: 'POST',
           headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) },
           body: file,
         });
         if (revision !== authRevision.current) return;
+        if (!safeImageUrl(image.url, targetId)) throw new Error('网关返回了不属于当前机器的图片。');
         existing.push({ ...image, name: file.name });
         attachmentDrafts.current.set(id, [...existing]);
         if (selected.current === id) setAttachments([...existing]);
@@ -539,17 +731,18 @@ export function App() {
     if (!snapshot?.nextCursor) return;
     const id = snapshot.thread.id;
     const cursor = snapshot.nextCursor;
+    const revision = authRevision.current;
     setOlderBusy(true);
     const before = timeline.current?.scrollHeight || 0;
     const scroll = timeline.current?.scrollTop || 0;
     try {
-      const incoming = await api<ThreadSnapshot>(
+      const incoming = await targetApi<ThreadSnapshot>(
         `/threads/${encodeURIComponent(id)}?cursor=${encodeURIComponent(cursor)}`,
       );
-      if (selected.current === id) {
+      if (revision === authRevision.current && selected.current === id) {
         commitSnapshot((current) => tracker.current.reconcile(current, incoming, true));
         requestAnimationFrame(() => {
-          if (selected.current === id && timeline.current)
+          if (revision === authRevision.current && selected.current === id && timeline.current)
             timeline.current.scrollTop = scroll + timeline.current.scrollHeight - before;
         });
       }
@@ -609,6 +802,30 @@ export function App() {
           <div className="spinner" />
           <p>正在连接你的工作空间…</p>
         </div>
+      </main>
+    );
+  if (!boot && !authRequired)
+    return (
+      <main className="pair-shell">
+        <section className="pair-card">
+          <h2>暂时无法连接{targetName}</h2>
+          <p className="error-banner" role="alert">
+            {error || '正在恢复连接，请稍后重试。'}
+          </p>
+          <TargetPicker targets={targets} targetId={targetId} onChange={chooseTarget} />
+          <button
+            className="secondary"
+            onClick={() => {
+              void refresh().catch((error) => {
+                if (error instanceof ApiError && error.status === 401) clearSession();
+                else setFailure(error);
+              });
+              void onRefreshTargets();
+            }}
+          >
+            重新连接
+          </button>
+        </section>
       </main>
     );
   if (!boot)
@@ -694,6 +911,18 @@ export function App() {
           <div className="brand">
             <span className="brand-mark">c/</span> Codex <span>随行</span>
           </div>
+          <TargetPicker
+            targets={targets.map((target) =>
+              target.id === targetId ? { ...target, connection: boot.connection } : target,
+            )}
+            targetId={targetId}
+            onChange={chooseTarget}
+          />
+          {directoryError && (
+            <p className="target-directory-error" role="status">
+              {directoryError}
+            </p>
+          )}
           <button
             className="new-thread"
             disabled={!ready}
@@ -736,7 +965,7 @@ export function App() {
           <button onClick={() => void openSettings()}>
             <span className={`connection-dot ${ready ? '' : 'offline'}`} />
             <span>
-              {ready ? '电脑已连接' : '等待连接'}
+              {targetName} · {ready ? '已连接' : '等待连接'}
               <small>{boot.device.name}</small>
             </span>
             <Icon name="settings" />
@@ -754,7 +983,9 @@ export function App() {
           </button>
           <div className="header-title">
             <strong>{snapshot?.thread.title || '你的工作空间'}</strong>
-            <span>{snapshot?.thread.cwd || '随时接续，保持专注'}</span>
+            <span title={snapshot?.thread.cwd}>
+              {targetName} · {snapshot?.thread.cwd || '随时接续，保持专注'}
+            </span>
           </div>
           <div className="header-actions">
             <span className="connection-pill">
@@ -767,6 +998,7 @@ export function App() {
               onClick={() => {
                 setError('');
                 void refresh().catch(setFailure);
+                void onRefreshTargets();
               }}
             >
               <Icon name="refresh" />
@@ -832,7 +1064,7 @@ export function App() {
                 </button>
               )}
               {snapshot.items.map((item) => (
-                <Message item={item} key={item.id} />
+                <Message item={item} targetId={targetId} key={item.id} />
               ))}
               {!snapshot.items.length && (
                 <div className="empty-state compact">
@@ -847,7 +1079,9 @@ export function App() {
                   request={request}
                   connected={ready}
                   answer={async (requestId, answer) => {
+                    const revision = authRevision.current;
                     await client.current!.command('request.respond', { requestId, ...answer });
+                    if (revision !== authRevision.current) return;
                     setNotice('回答已发送，等待电脑更新执行状态');
                     await syncSnapshot();
                   }}
@@ -901,7 +1135,7 @@ export function App() {
                   disabled={sending}
                   onChange={(e) => {
                     setDraft(e.target.value);
-                    storeDraft(snapshot.thread.id, e.target.value);
+                    storeDraft(snapshot.thread.id, e.target.value, targetId);
                   }}
                   onKeyDown={(e) => {
                     if (
@@ -1014,7 +1248,7 @@ export function App() {
             {modal === 'new' ? (
               <form onSubmit={createThread}>
                 <label className="form-field">
-                  电脑上的项目
+                  {targetName}上的项目
                   <select
                     value={newProject || boot.projects[0]?.id || ''}
                     onChange={(e) => setNewProject(e.target.value)}
@@ -1059,7 +1293,9 @@ export function App() {
                   <span className={`connection-dot ${ready ? '' : 'offline'}`} />
                   {boot.connection.message}
                 </div>
-                <p className="notice">{location.origin}</p>
+                <p className="notice">
+                  {location.origin} · {targetName}
+                </p>
                 <h3>已授权客户端</h3>
                 {identityNotice && (
                   <p className="notice" role="status">

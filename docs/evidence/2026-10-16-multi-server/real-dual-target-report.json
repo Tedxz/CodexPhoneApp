@@ -1,0 +1,122 @@
+{
+  "readonlyRetries": {
+    "CODEX_-32603": 1
+  },
+  "runId": "1792117339784-18c6e530",
+  "startedAt": "2026-10-16T02:22:19.784Z",
+  "result": "passed",
+  "sharedBackendOnly": true,
+  "existingConversationsModified": false,
+  "checks": [
+    {
+      "name": "connect_two_targets",
+      "status": "passed",
+      "evidence": {
+        "targets": [
+          {
+            "id": "local",
+            "connected": true,
+            "version": "0.163.0"
+          },
+          {
+            "id": "remote",
+            "connected": true,
+            "version": "0.163.0"
+          }
+        ],
+        "independentPeerConnections": 2
+      }
+    },
+    {
+      "name": "local_text_stream",
+      "status": "passed",
+      "evidence": {
+        "ownThreadCreated": true,
+        "exactPeerHistory": true,
+        "peerRealtimeDeltas": 11
+      }
+    },
+    {
+      "name": "remote_text_stream",
+      "status": "passed",
+      "evidence": {
+        "ownThreadCreated": true,
+        "exactPeerHistory": true,
+        "peerRealtimeDeltas": 10
+      }
+    },
+    {
+      "name": "unknown_and_cross_target_isolation",
+      "status": "passed",
+      "evidence": {
+        "unknownTarget404": true,
+        "wrongMachineThreadRejected": true,
+        "eventStreamsSeparated": true
+      }
+    },
+    {
+      "name": "remote_image_sftp_and_model",
+      "status": "passed",
+      "evidence": {
+        "modelReadDominantColor": true,
+        "remoteAbsolutePath": true,
+        "historyImageMappedToTarget": true,
+        "directoryMode": "700",
+        "fileMode": "600",
+        "crossTargetUpload404": true
+      }
+    },
+    {
+      "name": "remote_steer_and_interrupt",
+      "status": "passed",
+      "evidence": {
+        "peerObservedRunningSleep": true,
+        "sameSteeredTurn": true,
+        "peerObservedSteeringInput": true,
+        "peerObservedInterrupted": true
+      }
+    },
+    {
+      "name": "remote_readonly_approval_thread",
+      "status": "passed",
+      "evidence": {
+        "isolatedReadOnlySandbox": true,
+        "userApprovalReviewer": true,
+        "warmupComplete": true
+      }
+    },
+    {
+      "name": "remote_approval_via_target_websocket",
+      "status": "passed",
+      "evidence": {
+        "fileAbsentBeforeApproval": true,
+        "acceptedThroughRemoteTarget": true,
+        "nonceFileMatches": true,
+        "resolvedEvent": true,
+        "localDidNotReceiveApproval": true
+      }
+    },
+    {
+      "name": "restart_image_mapping",
+      "status": "passed",
+      "evidence": {
+        "freshManagerAndSshTunnel": true,
+        "sameHistoryImageUrl": true,
+        "originalImageBytesPreserved": true
+      }
+    }
+  ],
+  "ownThreads": {
+    "local": "01a14284-8fdb-70d3-8687-e22c2c169806",
+    "remote": "01a14284-b3cc-7e43-9cc0-43a66538194a",
+    "approval": "01a14285-006d-7211-8d7d-c95b59dbf740"
+  },
+  "cleanup": {
+    "ownActiveTurnsStoppedOrAlreadyTerminal": true,
+    "gatewayClosed": true,
+    "temporaryAuthorizationsRevoked": true,
+    "peerConnectionsClosed": true,
+    "sshTunnelsClosed": true
+  },
+  "finishedAt": "2026-10-16T02:23:11.384Z"
+}

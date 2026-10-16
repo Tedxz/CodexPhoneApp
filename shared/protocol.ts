@@ -88,17 +88,27 @@ export interface ConnectionState {
   message: string;
   serverVersion?: string;
   sharedBackend: true;
+  stage?: string;
+  errorCode?: string;
 }
 export interface Capabilities {
   images: boolean;
   planMode: boolean;
   liveControl: boolean;
 }
+export interface TargetSummary {
+  id: string;
+  name: string;
+  kind: 'local' | 'ssh';
+  connection: ConnectionState;
+  capabilities: Capabilities;
+}
 export interface Bootstrap {
   device: Device;
   projects: Project[];
   connection: ConnectionState;
   capabilities: Capabilities;
+  target?: TargetSummary;
 }
 export type GatewayEvent =
   | { type: 'connection'; connection: ConnectionState }

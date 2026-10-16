@@ -211,6 +211,8 @@ interface NativeOptions {
 interface NativeApi {
   origin: string;
   cookie: string;
+  targetPrefix: string;
+  targets(): Promise<object>;
   pair(token: string, name: string, clientKey: string): Promise<{ id: string }>;
   identify(clientKey: string): Promise<Device>;
   bootstrap(): Promise<object>;
@@ -219,7 +221,12 @@ interface NativeApi {
   image(path: string): Promise<ArrayBuffer>;
 }
 interface GatewayModule {
-  GatewayApi: new (origin: string, cookie?: string) => NativeApi;
+  GatewayApi: new (
+    origin: string,
+    cookie?: string,
+    targetId?: string,
+    legacy?: boolean,
+  ) => NativeApi;
   GatewayError: new (message: string, status: number) => Error & { status: number };
 }
 
@@ -372,14 +379,32 @@ interface NativeSession {
   cookie: string;
   deviceName: string;
 }
+interface NativeProfile extends NativeSession {
+  id: string;
+  name: string;
+  lastTargetId: string;
+  updatedAt: number;
+}
 interface VaultModule {
   AuthSession: new (origin?: string, cookie?: string, name?: string) => NativeSession;
+  ServerProfile: new (
+    id: string,
+    origin: string,
+    cookie?: string,
+    deviceName?: string,
+    name?: string,
+    target?: string,
+    updatedAt?: number,
+  ) => NativeProfile;
   SessionVault: new () => {
+    list(): Promise<NativeProfile[]>;
+    saveProfile(profile: NativeProfile): Promise<void>;
+    remove(id: string): Promise<void>;
     save(session: NativeSession): Promise<void>;
     load(): Promise<NativeSession | undefined>;
     loadOrigin(origin: string): Promise<NativeSession | undefined>;
     clientKey(): Promise<string>;
-    clear(origin: string): Promise<void>;
+    clear(origin: string, expectedCookie?: string): Promise<void>;
   };
 }
 
@@ -387,7 +412,9 @@ function mockedVault() {
   const entries = new Map<string, Map<string, Uint8Array | number>>();
   let readFailure = false;
   let writeFailure = false;
+  const queries: { hasAlias: boolean; returnType: number }[] = [];
   let randomCalls = 0;
+  let profileIds = 0;
   const alias = (value: Map<string, Uint8Array | number>) =>
     new TextDecoder().decode(value.get('alias') as Uint8Array);
   const kits = new Map<string, object>([
@@ -412,6 +439,7 @@ function mockedVault() {
             }
           },
           Type: { BASIC_URL_SAFE: 2 },
+          generateRandomUUID: () => `profile-${++profileIds}`,
         },
       },
     ],
@@ -421,20 +449,41 @@ function mockedVault() {
         asset: {
           Tag: {
             ALIAS: 'alias',
+            DATA_LABEL_NORMAL_1: 'label',
             SECRET: 'secret',
             RETURN_TYPE: 'return',
+            RETURN_LIMIT: 'limit',
+            RETURN_OFFSET: 'offset',
             ACCESSIBILITY: 'access',
             AUTH_TYPE: 'auth',
             SYNC_TYPE: 'sync',
             CONFLICT_RESOLUTION: 'conflict',
           },
-          ReturnType: { ALL: 0 },
+          ReturnType: { ALL: 0, ATTRIBUTES: 1 },
           Accessibility: { DEVICE_UNLOCKED: 2 },
           AuthType: { NONE: 0 },
           SyncType: { NEVER: 0 },
           ConflictResolution: { OVERWRITE: 0, THROW_ERROR: 1 },
           query: async (query: Map<string, Uint8Array | number>) => {
             if (readFailure) throw { code: 24000005 };
+            queries.push({ hasAlias: query.has('alias'), returnType: Number(query.get('return')) });
+            if (query.get('return') === 0 && !query.has('alias')) {
+              throw { code: 24000017, message: 'Batch secret query is not supported.' };
+            }
+            if (query.has('label')) {
+              const label = new TextDecoder().decode(query.get('label') as Uint8Array);
+              const matches = [...entries.values()].filter(
+                (value) => new TextDecoder().decode(value.get('label') as Uint8Array) === label,
+              );
+              const offset = Number(query.get('offset') || 0);
+              return matches
+                .slice(offset, offset + Number(query.get('limit') || matches.length))
+                .map((stored) => {
+                  const attributes = new Map(stored);
+                  attributes.delete('secret');
+                  return attributes;
+                });
+            }
             const stored = entries.get(alias(query));
             if (!stored) throw { code: 24000002 };
             return [stored];
@@ -471,6 +520,7 @@ function mockedVault() {
   return {
     ...module,
     entries,
+    queries,
     randomCalls: () => randomCalls,
     setReadFailure: (value: boolean) => {
       readFailure = value;
@@ -487,7 +537,7 @@ test('Harmony session vault stores all connection details only in Asset Store SE
   assert.equal(await vault.load(), undefined);
   await vault.save(new module.AuthSession('https://example.com', `codex_phone=${token}`, '手机'));
   assert.equal((await vault.load())?.cookie, `codex_phone=${token}`);
-  const stored = module.entries.get('codex-phone.sessions.v1');
+  const stored = module.entries.get('codex-phone.server.profile-1');
   assert.ok(stored);
   assert.equal(
     new TextDecoder().decode(stored.get('alias') as Uint8Array).includes('example.com'),
@@ -532,7 +582,7 @@ test('Harmony installation identity survives vault recreation, both gateway orig
   assert.equal(await vault.loadOrigin('https://other.example'), undefined);
   assert.equal(
     new TextDecoder()
-      .decode(module.entries.get('codex-phone.sessions.v1')!.get('secret') as Uint8Array)
+      .decode(module.entries.get('codex-phone.server.profile-1')!.get('secret') as Uint8Array)
       .includes(first),
     false,
   );
@@ -576,7 +626,7 @@ interface NativeLiveHandlers {
 }
 interface NativeLiveModule {
   NativeLiveClient: new (
-    api: Pick<NativeApi, 'origin' | 'cookie' | 'bootstrap'>,
+    api: Pick<NativeApi, 'origin' | 'cookie' | 'bootstrap' | 'targetPrefix'>,
     handlers: NativeLiveHandlers,
   ) => NativeLive;
 }
@@ -627,7 +677,12 @@ test('Harmony native live client authenticates WSS, filters duplicate events and
   const statuses: boolean[] = [];
   const events: EventEnvelope[] = [];
   const client = new module.NativeLiveClient(
-    { origin: 'https://example.com', cookie: `codex_phone=${token}`, bootstrap: async () => ({}) },
+    {
+      origin: 'https://example.com',
+      cookie: `codex_phone=${token}`,
+      targetPrefix: '/api/v1',
+      bootstrap: async () => ({}),
+    },
     {
       status: (value) => statuses.push(value),
       event: (event) => events.push(event),
@@ -723,7 +778,33 @@ interface StoreContext {
     off(name: string, callback: () => void): void;
   };
 }
+interface NativeTarget {
+  id: string;
+  name: string;
+  kind: 'local' | 'ssh';
+  connection: Bootstrap['connection'];
+  capabilities: Bootstrap['capabilities'];
+}
+interface NativeServerEntry {
+  profile: NativeProfile;
+  targets: NativeTarget[];
+  legacy: boolean;
+  loading: boolean;
+  error: string;
+}
 interface NativeAppStore {
+  servers: NativeServerEntry[];
+  activeServerId: string;
+  activeTargetId: string;
+  screen: string;
+  serverName: string;
+  editingServerId: string;
+  refreshOverview(): Promise<void>;
+  chooseTarget(serverId: string, targetId: string): Promise<void>;
+  showServers(): Promise<void>;
+  editServer(id?: string): void;
+  saveServer(): Promise<void>;
+  removeServer(id: string): Promise<void>;
   boot?: Bootstrap;
   api?: StoreApi;
   client?: NativeLive;
@@ -789,6 +870,17 @@ function mockedStore() {
     flush: async () => {},
   };
   const responses = {
+    targets: async (_origin: string): Promise<{ data: NativeTarget[] }> => ({
+      data: [
+        {
+          id: 'local',
+          name: '本机',
+          kind: 'local',
+          connection: connectedBootstrap().connection,
+          capabilities: connectedBootstrap().capabilities,
+        },
+      ],
+    }),
     bootstrap: async (): Promise<Bootstrap> => connectedBootstrap(),
     identify: async (): Promise<Device> => connectedBootstrap().device,
     pair: async (): Promise<Device> => connectedBootstrap().device,
@@ -814,11 +906,28 @@ function mockedStore() {
       super(message);
     }
   }
+  let generatedIds = 0;
+  class FakeProfile implements NativeProfile {
+    constructor(
+      public id: string,
+      public origin: string,
+      public cookie: string = '',
+      public deviceName: string = '',
+      public name: string = '',
+      public lastTargetId: string = 'local',
+      public updatedAt: number = 0,
+    ) {}
+  }
   class FakeGateway implements StoreApi {
     constructor(
       public origin: string,
       public cookie: string = '',
+      public targetId: string = 'local',
+      public legacy: boolean = true,
     ) {}
+    async targets() {
+      return responses.targets(this.origin);
+    }
     bootstrap() {
       return responses.bootstrap();
     }
@@ -872,6 +981,7 @@ function mockedStore() {
     }
   }
   const kits = new Map<string, object>([
+    ['@kit.ArkTS', { util: { generateRandomUUID: () => `generated-${++generatedIds}` } }],
     ['@kit.ArkData', { preferences: { getPreferences: async () => prefs } }],
     ['@kit.CoreFileKit', { fileIo: {} }],
     ['@kit.MediaLibraryKit', { photoAccessHelper: {} }],
@@ -888,7 +998,30 @@ function mockedStore() {
             public deviceName: string,
           ) {}
         },
+        ServerProfile: FakeProfile,
         SessionVault: class {
+          async list() {
+            return [...savedSessions.values()].map((session, index) => ({
+              ...session,
+              id: (session as NativeProfile).id || (index === 0 ? 'server-a' : `server-${index}`),
+              name: (session as NativeProfile).name || session.origin,
+              lastTargetId: 'local',
+              updatedAt: 0,
+            }));
+          }
+          async saveProfile(profile: NativeProfile) {
+            await responses.save(profile);
+            savedSessions.set(profile.origin, profile);
+          }
+          async remove(id: string) {
+            for (const [origin, session] of savedSessions) {
+              if (
+                (session as NativeProfile).id === id ||
+                (id === 'server-a' && origin === 'https://example.com')
+              )
+                savedSessions.delete(origin);
+            }
+          }
           async load() {
             return savedSessions.get('https://example.com');
           }
@@ -916,6 +1049,7 @@ function mockedStore() {
   const context: StoreContext = { cacheDir: '/unused-test-cache', eventHub: { on() {}, off() {} } };
   function activate() {
     store.api = api;
+    store.screen = 'threads';
     store.drafts = prefs;
     store.boot = connectedBootstrap();
     store.live = true;
@@ -946,6 +1080,7 @@ test('Harmony upgrades an authenticated legacy login in place and follows its me
   };
   try {
     await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
     await tick();
     assert.equal(store.boot?.device.id, 'same-installation');
     assert.equal(store.boot?.device.authorizationCount, 2);
@@ -967,6 +1102,7 @@ test('Harmony sends no installation identity before authenticated bootstrap succ
   };
   try {
     await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
     assert.equal(calls.identify.length, 0);
     assert.equal(calls.pair.length, 0);
     assert.equal(store.boot, undefined);
@@ -989,6 +1125,7 @@ test('Harmony skips missing identity APIs and preserves an authenticated login o
       };
     try {
       await store.initialize(context);
+      await store.chooseTarget('server-a', 'local');
       await tick();
       assert.equal(store.boot?.device.id, 'phone', String(failure));
       assert.equal(store.api?.cookie, `codex_phone=${token}`, String(failure));
@@ -1010,7 +1147,7 @@ test('Harmony skips missing identity APIs and preserves an authenticated login o
   }
 });
 
-test('Harmony re-pairing restores only the selected origin cookie and retains cookie-save warnings', async () => {
+test('Harmony re-pairing uses only the selected origin cookie and reports secure storage failures', async () => {
   for (const origin of ['https://example.com', 'https://other.example']) {
     const { store, responses, calls } = mockedStore();
     responses.save = async () => {
@@ -1030,9 +1167,9 @@ test('Harmony re-pairing restores only the selected origin cookie and retains co
           name: 'Mate 90 Pro Max',
         },
       ]);
-      assert.match(store.notice, /保存失败/);
-      assert.equal(store.boot?.device.id, 'phone');
-      assert.equal(store.pairToken, '');
+      assert.match(store.error, /保存失败/);
+      assert.equal(store.boot, undefined);
+      assert.equal(store.api, undefined);
     } finally {
       store.dispose();
     }
@@ -1044,7 +1181,9 @@ test('Harmony ignores identity results after logout and never uses client type o
   const pending = deferred<Device>();
   responses.identify = async () => pending.promise;
   try {
-    const initializing = store.initialize(context);
+    const initializing = store
+      .initialize(context)
+      .then(() => store.chooseTarget('server-a', 'local'));
     await tick();
     assert.equal(calls.identify.length, 1);
     await store.forget();
@@ -1119,6 +1258,7 @@ test('Harmony native store can restore a saved login after the first offline boo
   };
   try {
     await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
     assert.equal(store.checked, true);
     assert.equal(store.boot, undefined);
     await store.refresh();
@@ -1149,7 +1289,7 @@ test('Harmony native store preserves a newer draft typed while send acknowledgem
     pending.resolve('{"turnId":"turn"}');
     await sending;
     assert.equal(store.draft, 'new follow-up');
-    assert.equal(preferences.get('https://example.com|thread'), 'new follow-up');
+    assert.equal(preferences.get('https://example.com|local|thread'), 'new follow-up');
     assert.equal(store.sending, false);
   } finally {
     store.dispose();
@@ -1370,5 +1510,351 @@ test('Harmony abandons delayed subscribe retries when the selected session or lo
     } finally {
       store.dispose();
     }
+  }
+});
+
+test('Harmony stores more than two Servers in independent encrypted assets without evicting logins', async () => {
+  const module = mockedVault();
+  const vault = new module.SessionVault();
+  const identity = await vault.clientKey();
+  for (let index = 0; index < 5; index++) {
+    await vault.saveProfile(
+      new module.ServerProfile(
+        `server-${index}`,
+        `https://server-${index}.example`,
+        `codex_phone=${token}`,
+        'Mate 90 Pro Max',
+        `电脑 ${index}`,
+      ),
+    );
+  }
+  assert.equal((await new module.SessionVault().list()).length, 5);
+  assert.equal(
+    module.queries.some((query) => !query.hasAlias && query.returnType === 1),
+    true,
+  );
+  assert.equal(
+    module.queries.every((query) => query.returnType !== 0 || query.hasAlias),
+    true,
+  );
+  for (const [alias, value] of module.entries) {
+    if (!alias.startsWith('codex-phone.server.')) continue;
+    const secret = value.get('secret') as Uint8Array;
+    assert.ok(secret.byteLength <= 1024);
+    assert.match(new TextDecoder().decode(secret), /server-\d\.example/);
+    for (const [tag, attribute] of value) {
+      if (tag === 'secret' || !(attribute instanceof Uint8Array)) continue;
+      assert.doesNotMatch(
+        new TextDecoder().decode(attribute),
+        /\.example|Mate 90|电脑|codex_phone=/,
+      );
+    }
+  }
+  await vault.clear('https://server-1.example');
+  assert.equal((await vault.list()).length, 5);
+  assert.equal((await vault.loadOrigin('https://server-1.example'))?.cookie, '');
+  await vault.remove('server-1');
+  assert.equal((await vault.list()).length, 4);
+  assert.equal(await vault.clientKey(), identity);
+});
+
+test('Harmony migrates every legacy login idempotently and preserves v1 until all new assets are durable', async () => {
+  const module = mockedVault();
+  const origin = 'https://old-a.example';
+  const secondOrigin = 'https://old-b.example';
+  const legacy = {
+    version: 1,
+    lastOrigin: secondOrigin,
+    sessions: [
+      { origin, cookie: `codex_phone=${token}`, deviceName: '旧手机 A' },
+      { origin: secondOrigin, cookie: `codex_phone=${token}`, deviceName: '旧手机 B' },
+    ],
+  };
+  module.entries.set(
+    'codex-phone.sessions.v1',
+    new Map([
+      ['alias', new TextEncoder().encode('codex-phone.sessions.v1')],
+      ['secret', new TextEncoder().encode(JSON.stringify(legacy))],
+    ]),
+  );
+  const vault = new module.SessionVault();
+  await vault.saveProfile(
+    new module.ServerProfile(
+      'already-migrated',
+      origin,
+      `codex_phone=${'c'.repeat(43)}`,
+      '新名称',
+      'Server A',
+      'local',
+      0,
+    ),
+  );
+  module.setWriteFailure(true);
+  await assert.rejects(vault.list(), /保存/);
+  assert.equal(module.entries.has('codex-phone.sessions.v1'), true);
+  module.setWriteFailure(false);
+  const profiles = await vault.list();
+  assert.equal(profiles.length, 2);
+  assert.equal(
+    profiles.find((profile) => profile.origin === origin)?.cookie,
+    `codex_phone=${'c'.repeat(43)}`,
+  );
+  assert.equal(
+    profiles.find((profile) => profile.origin === secondOrigin)?.cookie,
+    `codex_phone=${token}`,
+  );
+  assert.equal((await vault.load())?.origin, secondOrigin);
+  assert.equal(module.entries.has('codex-phone.sessions.v1'), false);
+  assert.equal((await new module.SessionVault().list()).length, 2);
+});
+
+test('Harmony target APIs and image reads remain bound to one machine while authentication remains gateway scoped', async () => {
+  const mocked = mockedGateway();
+  const api = new mocked.GatewayApi(
+    'https://example.com',
+    `codex_phone=${token}`,
+    'remote-linux',
+    false,
+  );
+  await api.targets();
+  await api.bootstrap();
+  await api.threads('same', '/same/path');
+  await api.upload(new ArrayBuffer(8), 'image/png');
+  assert.equal(mocked.requests[0].url, 'https://example.com/api/v1/targets');
+  assert.equal(mocked.requests[1].url, 'https://example.com/api/v1/targets/remote-linux/bootstrap');
+  assert.match(mocked.requests[2].url, /\/targets\/remote-linux\/threads\?/);
+  assert.equal(mocked.requests[3].url, 'https://example.com/api/v1/targets/remote-linux/uploads');
+  await assert.rejects(api.image('/api/v1/targets/local/uploads/same.png'), /不属于/);
+  await assert.rejects(api.image('/api/v1/uploads/same.png'), /不属于/);
+  mocked.setResponse({ result: new Uint8Array([7]).buffer });
+  await api.image('/api/v1/targets/remote-linux/uploads/same.png');
+  assert.equal(mocked.requests.length, 5);
+});
+
+test('Harmony homepage groups all saved Servers and bounds foreground polling to four requests', async () => {
+  const { store, responses, savedSessions, context } = mockedStore();
+  for (let index = 1; index < 9; index++) {
+    savedSessions.set(`https://server-${index}.example`, {
+      origin: `https://server-${index}.example`,
+      cookie: `codex_phone=${token}`,
+      deviceName: '手机',
+    });
+  }
+  let concurrent = 0;
+  let maximum = 0;
+  const gates: ReturnType<typeof deferred<void>>[] = [];
+  responses.targets = async () => {
+    concurrent++;
+    maximum = Math.max(maximum, concurrent);
+    const gate = deferred<void>();
+    gates.push(gate);
+    await gate.promise;
+    concurrent--;
+    return {
+      data: [
+        {
+          id: 'local',
+          name: '本机',
+          kind: 'local',
+          connection: connectedBootstrap().connection,
+          capabilities: connectedBootstrap().capabilities,
+        },
+      ],
+    };
+  };
+  try {
+    const initializing = store.initialize(context);
+    await tick();
+    assert.equal(store.checked, true, 'The homepage must appear before slow Servers respond');
+    assert.equal(store.screen, 'servers');
+    assert.equal(store.servers.length, 9);
+    assert.equal(gates.length, 4);
+    for (let index = 0; index < 9; index++) {
+      gates[index].resolve();
+      await tick();
+    }
+    await initializing;
+    assert.equal(maximum, 4);
+    assert.equal(
+      store.servers.every((entry) => entry.targets.length === 1),
+      true,
+    );
+    assert.equal(
+      store.api,
+      undefined,
+      'Overview polling must not select a machine or open a live socket',
+    );
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony only a missing targets endpoint enables legacy local fallback; one broken Server does not affect others', async () => {
+  for (const status of [404, 401, 500]) {
+    const { store, responses, savedSessions, context, gatewayError } = mockedStore();
+    savedSessions.set('https://other.example', {
+      origin: 'https://other.example',
+      cookie: `codex_phone=${token}`,
+      deviceName: '手机',
+    });
+    responses.targets = async (origin) => {
+      if (origin === 'https://example.com') throw gatewayError(status);
+      return {
+        data: [
+          {
+            id: 'remote',
+            name: '远程机器',
+            kind: 'ssh',
+            connection: connectedBootstrap().connection,
+            capabilities: connectedBootstrap().capabilities,
+          },
+        ],
+      };
+    };
+    try {
+      await store.initialize(context);
+      const original = store.servers.find(
+        (entry) => entry.profile.origin === 'https://example.com',
+      )!;
+      const other = store.servers.find(
+        (entry) => entry.profile.origin === 'https://other.example',
+      )!;
+      assert.equal(other.targets[0].id, 'remote');
+      assert.equal(other.error, '');
+      assert.equal(original.legacy, status === 404);
+      assert.equal(original.targets.length, status === 404 ? 1 : 0);
+      assert.equal(!!original.profile.cookie, status !== 401);
+    } finally {
+      store.dispose();
+    }
+  }
+});
+
+test('Harmony machine switching isolates matching thread IDs, drafts and late snapshots', async () => {
+  const { store, responses, preferences, context } = mockedStore();
+  responses.targets = async () => ({
+    data: ['local', 'remote'].map((id) => ({
+      id,
+      name: id,
+      kind: id === 'local' ? 'local' : 'ssh',
+      connection: connectedBootstrap().connection,
+      capabilities: connectedBootstrap().capabilities,
+    })),
+  });
+  try {
+    await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
+    await tick();
+    await store.chooseThread('same');
+    store.setDraft('local draft');
+    await store.chooseTarget('server-a', 'remote');
+    await tick();
+    await store.chooseThread('same');
+    assert.equal(store.draft, '');
+    store.setDraft('remote draft');
+    await store.chooseTarget('server-a', 'local');
+    await tick();
+    await store.chooseThread('same');
+    assert.equal(store.draft, 'local draft');
+    assert.equal(preferences.get('server-a|remote|same'), 'remote draft');
+    const delayed = deferred<string>();
+    responses.command = async () => delayed.promise;
+    const oldChoice = store.chooseThread('same');
+    await tick();
+    await store.chooseTarget('server-a', 'remote');
+    responses.command = async () =>
+      JSON.stringify({
+        ...snapshot('remote view', 4),
+        thread: { ...snapshot('', 1).thread, id: 'same' },
+      });
+    await store.chooseThread('same');
+    delayed.resolve(
+      JSON.stringify({
+        ...snapshot('local late', 4),
+        thread: { ...snapshot('', 1).thread, id: 'same' },
+      }),
+    );
+    await oldChoice;
+    assert.equal(store.snapshot?.items[0].text, 'remote view');
+    assert.equal(store.draft, 'remote draft');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony changing a Server address keeps the original login until successful pairing', async () => {
+  const { store, context, savedSessions } = mockedStore();
+  try {
+    await store.initialize(context);
+    store.editServer('server-a');
+    store.endpoint = 'https://changed.example';
+    store.serverName = '新的 Server';
+    await store.saveServer();
+    assert.equal(store.servers.length, 1);
+    assert.equal(store.servers[0].profile.id, 'server-a');
+    assert.equal(store.servers[0].profile.cookie, `codex_phone=${token}`);
+    assert.equal(savedSessions.has('https://example.com'), true);
+    assert.equal(savedSessions.has('https://changed.example'), false);
+    assert.match(store.error, /配对成功前保留原连接/);
+    assert.equal(store.screen, 'pair');
+    store.pairToken = token;
+    await store.pair();
+    assert.equal(store.servers[0].profile.origin, 'https://changed.example');
+    assert.notEqual(store.servers[0].profile.id, 'server-a');
+    assert.equal(savedSessions.has('https://example.com'), false);
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony a stale unauthorized response cannot clear a newer saved cookie', async () => {
+  const module = mockedVault();
+  const vault = new module.SessionVault();
+  const origin = 'https://example.com';
+  await vault.saveProfile(new module.ServerProfile('same-server', origin, `codex_phone=${token}`));
+  const fresh = `codex_phone=${'d'.repeat(43)}`;
+  await Promise.all([
+    vault.saveProfile(new module.ServerProfile('same-server', origin, fresh)),
+    vault.clear(origin, `codex_phone=${token}`),
+  ]);
+  assert.equal((await vault.loadOrigin(origin))?.cookie, fresh);
+  await vault.clear(origin, fresh);
+  assert.equal((await vault.loadOrigin(origin))?.cookie, '');
+});
+
+test('Harmony polls update observed machine rows in place and preserve stable Server rows on rename', async () => {
+  const { store, responses, context } = mockedStore();
+  try {
+    await store.initialize(context);
+    const server = store.servers[0];
+    const machine = server.targets[0];
+    responses.targets = async () => ({
+      data: [
+        {
+          id: 'local',
+          name: '重命名机器',
+          kind: 'local',
+          connection: {
+            ...connectedBootstrap().connection,
+            connected: false,
+            message: 'Codex 未运行',
+          },
+          capabilities: connectedBootstrap().capabilities,
+        },
+      ],
+    });
+    await store.refreshOverview();
+    assert.equal(store.servers[0], server);
+    assert.equal(store.servers[0].targets[0], machine);
+    assert.equal(machine.name, '重命名机器');
+    assert.equal(machine.connection.connected, false);
+    assert.equal(machine.connection.message, 'Codex 未运行');
+    store.editServer(server.profile.id);
+    store.serverName = '重命名 Server';
+    await store.saveServer();
+    assert.equal(store.servers[0], server);
+    assert.equal(server.profile.name, '重命名 Server');
+  } finally {
+    store.dispose();
   }
 });

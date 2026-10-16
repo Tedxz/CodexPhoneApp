@@ -82,7 +82,7 @@ export class NativeLiveClient {
     // gateway's exact-origin validation. API 26 adds non-default port support.
     const headers: SocketHeaders = { Cookie: this.api.cookie };
     const options: webSocket.WebSocketRequestOptions = { header: headers, supportOriginPort: true };
-    const endpoint = this.api.origin.replace(/^http/, 'ws') + '/api/v1/ws';
+    const endpoint = this.api.origin.replace(/^http/, 'ws') + this.api.targetPrefix + '/ws';
     socket.connect(endpoint, options).catch(() => this.disconnected(socket, 1006));
   }
 

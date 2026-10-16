@@ -2,6 +2,10 @@
 
 本清单区分代码验证与端到端验证。测试替身通过、网页构建成功、共享 socket 文件存在，都不能代替真实跨端运行验证。
 
+## 最新多 Server / SSH 验收（2026-10-16）
+
+`feat/multi-server-targets` 已通过 152 项自动测试、网页与鸿蒙构建，以及真实本机/SSH 双机器的文字流、图片识别、追加/停止、审批和重启后图片映射。Mate 90 Pro Max 已安装新版，通过独立双 Server 配对、离线隔离、重启恢复与真实远程对话；详情、产物及范围限制见[多 Server 验收记录](evidence/2026-10-16-multi-server/REAL-ACCEPTANCE.md)。当前运行入口仅保留 Funnel 443，网关由 LaunchAgent 保活，配置见[Funnel 服务文档](FUNNEL-SERVICE.md)。以下记录保留较早阶段的结果及当时限制。
+
 已在本机连接真实共享 control socket，并通过局域网地址完成移动尺寸 Chromium 的网页验收。Funnel 443 公网 HTTPS 也已验证可访问，用户确认页面打开。完整网页测试的浏览器运行在电脑上，用户尚未明确所用网络类型，因此 iPhone Safari、Android Chrome 真机完整操作、蜂窝网络和公网 WSS 完整流程仍待验收。
 
 ## 自动化与只读诊断

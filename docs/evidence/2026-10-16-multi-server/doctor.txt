@@ -1,0 +1,25 @@
+
+> codex-phone@0.1.0 doctor
+> node --import tsx scripts/doctor.ts
+
+Codex Phone 只读诊断（不启动后端、不恢复会话、不修改系统配置）
+[OK] Node.js: v22.23.1
+[OK] 配置: 127.0.0.1:8787；入口 https://xz-macbookair.tail9ddfa1.ts.net
+[OK] 网页构建: dist/index.html 存在
+[OK] 项目目录: /Users/xiezheng/Code/CodexPhoneApp
+[OK] Codex CLI: codex-cli 0.162.1
+[OK] socket 文件: /Users/xiezheng/.codex/app-server-control/app-server-control.sock
+[OK] 共享 socket: WebSocket Upgrade 成功
+[OK] initialize: 协议握手成功
+[OK] thread/loaded/list: 只读查询成功，返回 8 条
+[OK] thread/list: 只读查询成功，返回 1 条
+
+机器 XZ-CATL (xz-catl)：仅检查已有 SSH 与 Codex，不创建远端文件
+[OK] xz-catl SSH: 本地私有转发已建立；继续验证远端共享后端
+[OK] 共享 socket: WebSocket Upgrade 成功
+[OK] initialize: 协议握手成功
+[OK] thread/loaded/list: 只读查询成功，返回 8 条
+[OK] thread/list: 只读查询成功，返回 1 条
+[OK] xz-catl 项目目录: /Users/zhengxie/Code
+[OK] xz-catl 图片传输: SFTP 可用；目录写入权限在上传时验证，诊断未创建目录或上传文件
+诊断通过仅证明握手和只读列表可用；实时追加、停止、审批同步及真机网络仍须按 docs/ACCEPTANCE.md 验证。

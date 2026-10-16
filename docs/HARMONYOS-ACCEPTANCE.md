@@ -1,6 +1,10 @@
 # HarmonyOS 原生应用验收
 
-日期：2026-10-16（Asia/Shanghai）。分支：`feat/harmonyos-app`。客户端使用 ArkTS / ArkUI，包名 `com.xiezheng.codexphone`，要求 HarmonyOS 7 / API 26。
+日期：2026-10-16（Asia/Shanghai）。初始原生分支：`feat/harmonyos-app`；当前多 Server 分支：`feat/multi-server-targets`。客户端使用 ArkTS / ArkUI，包名 `com.xiezheng.codexphone`，要求 HarmonyOS 7 / API 26。
+
+## 多 Server 与 SSH 机器更新
+
+最新签名包已安装到 Mate 90 Pro Max。真机通过旧凭据迁移、第二个独立 Server 配对、按 Server 分组显示机器、离线隔离与恢复、覆盖安装和重启保留两个登录，以及从手机向 XZ-CATL 发起真实远程对话。验收后移除临时 Server，保留原 Funnel 下的本机与 XZ-CATL。最终 152 项自动测试（含 34 项原生测试）及网页、unsigned / signed HAP 构建通过；当前产物校验值、截图、发现并修复的系统行为差异见[多 Server 验收记录](evidence/2026-10-16-multi-server/REAL-ACCEPTANCE.md)。以下保留各阶段原始验收信息。
 
 ## 环境与产物
 
@@ -11,7 +15,7 @@
 - unsigned HAP 已在模拟器实际安装并启动。它不是可直接安装到真实手机的签名包。
 - 首次模拟器验收 unsigned HAP SHA-256：`91666b2876fe74bca286c968bb37a5f90226f0bfbb3b957e65388c6c649f4bca`。具体版本与校验信息见 [环境和构建记录](evidence/2026-10-16-harmonyos/environment.json)。后续界面修复的当前产物记录见文末。
 
-`npm run check` 当前通过格式检查、114 项测试（0 失败、0 跳过）、TypeScript 检查与网页生产构建。其中 25 项原生源码测试覆盖网络与安全存储、事件合并、断线、登录切换及在途请求竞态。
+身份识别阶段的 `npm run check` 通过格式检查、114 项测试（0 失败、0 跳过）、TypeScript 检查与网页生产构建。其中 25 项原生源码测试覆盖网络与安全存储、事件合并、断线、登录切换及在途请求竞态；最新多 Server 检查结果见上节。
 
 ## 验证方法
 

@@ -51,6 +51,7 @@ export class LiveClient {
       resync(): void;
       unauthorized(): void;
     },
+    private routePrefix = '',
   ) {}
 
   connect(): void {
@@ -62,7 +63,7 @@ export class LiveClient {
       return;
     clearTimeout(this.retry);
     const ws = new WebSocket(
-      `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v1/ws`,
+      `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v1${this.routePrefix}/ws`,
     );
     this.ws = ws;
     ws.onopen = () => {
@@ -120,7 +121,7 @@ export class LiveClient {
       // Check the authenticated HTTP endpoint so an expired session cannot
       // become an endless opaque WebSocket reconnect loop.
       if (event.code === 1006)
-        void api('/bootstrap').catch((error) => {
+        void api(`${this.routePrefix}/bootstrap`).catch((error) => {
           if (
             this.stopped ||
             this.ws !== ws ||

@@ -2,6 +2,29 @@
 
 网页与 HarmonyOS 原生客户端使用同一网关。接口类型以 [`shared/protocol.ts`](../shared/protocol.ts) 为准；客户端不直接连接 Codex control socket，也不接收电脑端 Codex 登录凭据。
 
+## Server 与目标机器
+
+一个 Server 是一个已配对的网关入口，它可以管理本机和多个 SSH 目标。配对、设备授权、退出登录属于 Server；项目、会话、模型、图片和实时连接属于目标机器。已配对客户端可以访问该 Server 显式配置的全部目标。
+
+`GET /api/v1/targets` 需要认证，返回 `{ data: TargetSummary[] }`。每个摘要包含 `id`、`name`、`kind`（`local` 或 `ssh`）、`connection`、`capabilities`。离线目标仍在列表中；`connection.stage`、`errorCode` 可用于区分 SSH 与 Codex 的连接问题，目录查询不等待全部目标上线。
+
+新客户端使用 `/api/v1/targets/:targetId` 作为会话接口前缀：
+
+| 方法与路径                                  | 作用                                                    |
+| ------------------------------------------- | ------------------------------------------------------- |
+| `GET /api/v1/targets/:targetId/bootstrap`   | 原 `Bootstrap` 加 `target` 摘要，项目和能力均来自该目标 |
+| `GET /api/v1/targets/:targetId/workspaces`  | 目标工作路径列表                                        |
+| `GET /api/v1/targets/:targetId/threads`     | 目标会话列表，查询参数不变                              |
+| `GET /api/v1/targets/:targetId/threads/:id` | 目标会话快照与历史                                      |
+| `GET /api/v1/targets/:targetId/models`      | 目标可用模型                                            |
+| `POST /api/v1/targets/:targetId/uploads`    | 上传图片，返回该目标作用域的图片 URL                    |
+| `GET /api/v1/targets/:targetId/uploads/:id` | 读取该目标托管图片                                      |
+| `/api/v1/targets/:targetId/ws`              | 固定绑定该目标的实时连接，命令与事件结构不变            |
+
+旧会话接口及 `/api/v1/ws` 始终指向 `local`，不会随其他客户端选择而改变。目标不存在返回 `404 TARGET_NOT_FOUND`，目标不可用不回退到本机。新客户端只有在旧网关的 `/targets` 明确返回 404 时才使用单机兼容模式；认证、网络或其他错误不触发回退。
+
+同一会话 ID、审批 ID、上传 ID 在不同目标间不互通。事件 `epoch/seq`、发送锁及请求去重均按目标隔离。客户端使用 `(serverId, targetId, threadId)` 隔离草稿、附件与缓存，切换目标后丢弃旧上下文的迟到响应。实际部署见 [多 Server 与 SSH 机器配置](MULTI-SERVER.md)。
+
 ## 身份与 HTTP
 
 入口须与 `publicUrl` 或 `allowedOrigins` 匹配。所有非 GET/HEAD 请求带 `Origin`、`X-Codex-Phone: 1`；JSON 请求带 `Content-Type: application/json`。配对成功后网关写入 30 天有效的 `codex_phone` HttpOnly、SameSite=Strict cookie；HTTPS 入口还设 Secure。客户端保留 cookie，并使用相同来源访问 HTTP/WS。原生客户端需使用 cookie jar 并携带配置入口的 Origin。
@@ -33,6 +56,8 @@
 会话列表中的 `cwd` 为可选的完整工作路径精确筛选，可与标题搜索 `search` 和分页游标一起使用。省略表示全部路径，`cwd=` 表示没有记录路径的会话；切换筛选条件时从首页重新查询，不复用旧游标。`workspaces` 返回 `{ cwd, threadCount, activeCount, updatedAt }`，时间为毫秒时间戳，按最近更新时间倒序排列；汇总所有未归档、符合当前会话来源筛选的历史分页，同一会话去重计数。该接口需要配对，并且不限制在配置的新建项目列表中。
 
 图片支持 PNG、JPEG、WebP，单张上限 10 MiB；服务端核对文件签名与 MIME。每次发送最多 8 张。API 不接受任意本地文件路径；上传返回的 ID 用于后续发送。未被消息引用的过期上传在网关启动时清理，已引用图片保留。
+
+SSH 目标发送图片前，网关先经 SFTP 上传到配置的私有目录，成功后才向 Codex 提交远端路径。图片记录绑定目标，远端路径映射持久保存，历史回显使用网关保留的原文件。传输失败不会启动任务，发送结果不明时不会重放。未配置或无法使用 SFTP 时，目标可报告 `images: false`，其他能力独立可用；网关不会按历史内容任意读取远端文件。
 
 错误响应为 `{ error: { code, message } }`。常见状态码：`400` 无效输入、`401` 未配对或凭据失效、`403` 来源不允许、`409` 身份冲突、`413` 内容过大、`429` 限流、`503` 后端不可用。后端离线时页面仍可显示连接状态。
 
@@ -79,7 +104,7 @@
 
 ## 恢复与兼容
 
-每个操作使用随机唯一 ID。网关在当前进程内按设备和请求 ID 缓存一小时的操作结果；相同 ID 但不同参数会拒绝。这不提供跨网关重启的持久去重保证。发送后掉线且未收到确认时，客户端先核对历史，不自动重发生成操作。
+每个操作使用随机唯一 ID。网关在当前进程内按设备、目标机器和请求 ID 缓存一小时的操作结果；相同作用域内的 ID 但不同参数会拒绝。这不提供跨网关重启的持久去重保证。发送后掉线且未收到确认时，客户端先核对历史，不自动重发生成操作。
 
 手机断线不会停止电脑任务。WebSocket 重连后需重新订阅当前会话并同步快照。草稿由客户端保存；已发送消息以服务器历史和当前轮次为准。
 

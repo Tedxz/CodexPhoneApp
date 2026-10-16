@@ -14,7 +14,7 @@ class BrowserSocket {
   onmessage?: (event: { data: string }) => void;
   onclose?: (event: { code: number }) => void;
   onerror?: () => void;
-  constructor() {
+  constructor(readonly url: string) {
     BrowserSocket.instances.push(this);
   }
   open() {
@@ -29,7 +29,7 @@ class BrowserSocket {
     if (this.failSend) throw new Error('Socket closed between readyState check and send');
   }
 }
-function setup(t: TestContext) {
+function setup(t: TestContext, routePrefix = '') {
   const originals = new Map(
     ['WebSocket', 'location', 'fetch'].map((name) => [
       name,
@@ -48,12 +48,15 @@ function setup(t: TestContext) {
     value: { protocol: 'https:', host: 'phone.example' },
   });
   const calls = { statuses: [] as boolean[], events: 0, resync: 0, unauthorized: 0 };
-  const client = new LiveClient({
-    status: (value) => calls.statuses.push(value),
-    event: () => calls.events++,
-    resync: () => calls.resync++,
-    unauthorized: () => calls.unauthorized++,
-  });
+  const client = new LiveClient(
+    {
+      status: (value) => calls.statuses.push(value),
+      event: () => calls.events++,
+      resync: () => calls.resync++,
+      unauthorized: () => calls.unauthorized++,
+    },
+    routePrefix,
+  );
   t.after(() => {
     client.close();
     for (const [name, descriptor] of originals)
@@ -156,4 +159,21 @@ test('malformed JSON primitives and incomplete event envelopes are ignored', (t)
     socket().onmessage?.({ data });
   assert.equal(calls.events, 0);
   assert.equal(calls.resync, 1);
+});
+
+test('target sockets and authentication probes remain bound to the same machine', async (t) => {
+  const { client, calls, socket } = setup(t, '/targets/remote-a');
+  const requests: string[] = [];
+  globalThis.fetch = async (url) => {
+    requests.push(String(url));
+    return new Response('{}', { status: 401 });
+  };
+  client.connect();
+  assert.equal(socket().url, 'wss://phone.example/api/v1/targets/remote-a/ws');
+  socket().readyState = BrowserSocket.CLOSED;
+  socket().onclose?.({ code: 1006 });
+  await tick();
+  await tick();
+  assert.deepEqual(requests, ['/api/v1/targets/remote-a/bootstrap']);
+  assert.equal(calls.unauthorized, 1);
 });

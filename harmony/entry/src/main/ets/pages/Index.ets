@@ -1,8 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { AppStore } from '../state/AppStore';
+import { AppStore, ServerEntry } from '../state/AppStore';
 import { Attachment, ConversationItem, Device, PendingRequest, Project, QuestionAnswer, ThreadSummary,
   WorkspaceSummary } from '../model/Protocol';
+import { ServerCard } from '../components/ServerCard';
 import { MessageCard } from '../components/MessageCard';
 import { RequestCard } from '../components/RequestCard';
 import { SettingsControls } from '../components/SettingsControls';
@@ -15,6 +16,7 @@ struct Index {
   @State store: AppStore = new AppStore();
   @State controlsOpen: boolean = false;
   @State revokeId: string = '';
+  @State removeServerId: string = '';
   @State expandedTools: string[] = [];
   private timeline: Scroller = new Scroller();
   private followLatest: boolean = true;
@@ -46,15 +48,9 @@ struct Index {
   }
 
   onBackPress(): boolean {
-    if (this.store.screen !== 'threads') {
-      this.store.backToThreads();
-      return true;
-    }
-    if (this.store.mode === 'workspaces' && this.store.workspace !== null) {
-      this.store.selectWorkspace(null);
-      return true;
-    }
-    return false;
+    if (this.store.screen === 'servers') return false;
+    this.store.back();
+    return true;
   }
 
   private overview(): boolean {
@@ -153,8 +149,8 @@ struct Index {
         .height(44)
         .fontColor(GREEN)
         .backgroundColor(PALE_GREEN)
-        .accessibilityText('返回会话列表')
-        .onClick(() => this.store.backToThreads())
+        .accessibilityText('返回上一页')
+        .onClick(() => this.store.back())
       Column({ space: 4 }) {
         Text(this.store.screen === 'chat' ? this.store.snapshot?.thread.title || '正在打开会话…' : title)
           .fontSize(18)
@@ -163,7 +159,7 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
-        Text(this.store.screen === 'chat' ? this.store.snapshot?.thread.cwd || '' : subtitle)
+        Text(this.store.screen === 'chat' ? `${this.store.contextTitle} · ${this.store.snapshot?.thread.cwd || ''}` : subtitle)
           .fontSize(11)
           .fontColor(MUTED)
           .maxLines(1)
@@ -187,10 +183,52 @@ struct Index {
   }
 
   @Builder
+  serversPage() {
+    Row({ space: 12 }) {
+      this.brand()
+      Blank()
+      Button('＋').id('add-server').fontSize(27).width(46).height(46).backgroundColor(GREEN)
+        .accessibilityText('添加 Server').onClick(() => this.store.editServer())
+    }.width('100%').padding(20)
+    Row() {
+      Text('你的机器').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
+      Blank()
+      Button('刷新').height(40).fontSize(13).fontColor(GREEN).backgroundColor(PALE_GREEN)
+        .onClick(() => this.store.refreshOverview())
+    }.width('100%').padding({ left: 20, right: 20, bottom: 10 })
+    List({ space: 20 }) {
+      if (this.store.servers.length === 0) {
+        ListItem() {
+          Column({ space: 14 }) {
+            Text('添加一个 Server，接续多台机器上的 Codex 会话。').fontSize(16).lineHeight(25).fontColor(MUTED)
+            Button('添加 Server').backgroundColor(GREEN).onClick(() => this.store.editServer())
+          }.width('100%').padding(24).backgroundColor(CARD_BACKGROUND).borderRadius(20)
+        }
+      }
+      ForEach(this.store.servers, (entry: ServerEntry) => {
+        ListItem() {
+          ServerCard({ entry: entry,
+            onManage: (id: string) => this.store.editServer(id),
+            onChoose: (serverId: string, targetId: string) => { void this.store.chooseTarget(serverId, targetId); } })
+        }
+      }, (entry: ServerEntry) => entry.profile.id)
+      ListItem() {
+        Text('机器由各 Server 配置；在前台每 10 秒更新状态。')
+          .fontSize(12).fontColor(MUTED).textAlign(TextAlign.Center).width('100%').padding(12)
+      }
+    }.layoutWeight(1).width('100%').padding({ left: 20, right: 20, bottom: 20 }).scrollBar(BarState.Off)
+  }
+
+  @Builder
   pairPage() {
     Scroll() {
       Column({ space: 24 }) {
-        this.brand()
+        Row() {
+          this.brand()
+          Blank()
+          Button('返回').fontSize(13).height(40).fontColor(GREEN).backgroundColor(PALE_GREEN)
+            .onClick(() => this.store.showServers())
+        }.width('100%')
         Column({ space: 12 }) {
           Text('想法继续，\n不必守在电脑前。')
             .fontSize(34)
@@ -206,8 +244,11 @@ struct Index {
         }
         .alignItems(HorizontalAlign.Start)
         Column({ space: 14 }) {
-          Text('连接你的电脑').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
-          Text('电脑地址').fontSize(12).fontColor(MUTED).width('100%')
+          Text(this.store.editingServerId ? '管理 Server' : '添加 Server').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
+          TextInput({ text: this.store.serverName, placeholder: 'Server 名称，例如：我的 Mac' })
+            .id('server-name').height(50).fontSize(14).fontColor(INK).backgroundColor(PAGE_BACKGROUND).maxLength(80)
+            .onChange((value: string) => this.store.serverName = value)
+          Text('Server 地址').fontSize(12).fontColor(MUTED).width('100%')
           TextInput({ text: this.store.endpoint, placeholder: 'https://你的电脑.ts.net' })
             .id('pair-endpoint')
             .type(InputType.Normal)
@@ -234,7 +275,7 @@ struct Index {
             .fontColor(INK)
             .backgroundColor(PAGE_BACKGROUND)
             .onChange((value: string) => this.store.pairToken = value)
-          Button(this.store.busy ? '正在连接…' : '配对并进入  ↗')
+          Button(this.store.busy ? '正在连接…' : '配对并保存  ↗')
             .id('pair-submit')
             .width('100%')
             .height(52)
@@ -243,16 +284,24 @@ struct Index {
             .enabled(!this.store.busy && !!this.store.pairToken.trim() &&
               (!!this.store.endpoint.trim() || this.store.pairToken.trim().startsWith('http')))
             .onClick(() => this.store.pair())
-          if (this.store.hasSavedConnection) {
-            Button('重试已保存的连接')
-              .id('retry-saved-connection')
-              .width('100%')
-              .height(48)
-              .fontSize(14)
-              .fontColor(GREEN)
-              .backgroundColor(PALE_GREEN)
-              .enabled(!this.store.busy)
-              .onClick(() => this.store.refresh())
+          Button('保存名称与地址').width('100%').height(46).fontSize(14).fontColor(GREEN).backgroundColor(PALE_GREEN)
+            .enabled(!this.store.busy && !!this.store.endpoint.trim()).onClick(() => this.store.saveServer())
+          Text('修改地址后需要重新配对。每个 Server 的登录分别保存。')
+            .fontSize(12).lineHeight(20).fontColor(MUTED).width('100%')
+          if (this.store.editingServerId) {
+            if (this.removeServerId === this.store.editingServerId) {
+              Text('仅从手机移除此 Server，电脑任务继续运行。').fontSize(12).fontColor(ERROR)
+              Row({ space: 12 }) {
+                Button('取消').fontColor(GREEN).backgroundColor(PALE_GREEN).onClick(() => this.removeServerId = '')
+                Button('确认移除').backgroundColor(ERROR).enabled(!this.store.busy).onClick(() => {
+                  this.store.removeServer(this.store.editingServerId);
+                  this.removeServerId = '';
+                })
+              }
+            } else {
+              Button('移除 Server').fontSize(13).fontColor(ERROR).backgroundColor('#F9EDE7')
+                .onClick(() => this.removeServerId = this.store.editingServerId)
+            }
           }
           Text('支持局域网地址或 Tailscale Funnel。\n在电脑项目目录运行 npm run pair 获取凭据。')
             .fontSize(12)
@@ -369,6 +418,8 @@ struct Index {
           .onClick(() => this.openNew())
       }
       .width('100%')
+      Button(`‹  ${this.store.contextTitle}`).fontSize(12).height(36).fontColor(GREEN).backgroundColor(PALE_GREEN)
+        .width('100%').onClick(() => this.store.showServers())
       Row({ space: 4 }) {
         Button('全部会话')
           .id('browse-all')
@@ -716,7 +767,7 @@ struct Index {
 
   @Builder
   settingsPage() {
-    this.pageHeader('连接与客户端', '你的电脑 · 你的会话')
+    this.pageHeader('连接与客户端', this.store.contextTitle)
     List({ space: 16 }) {
       ListItem() {
         Column({ space: 12 }) {
@@ -772,8 +823,10 @@ struct Index {
           LoadingProgress().width(36).height(36).color(GREEN)
           Text('正在连接你的工作空间…').fontSize(14).fontColor(MUTED)
         }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
-      } else if (!this.store.boot) {
+      } else if (this.store.screen === 'pair') {
         this.pairPage()
+      } else if (this.store.screen === 'servers' || !this.store.activeServerId) {
+        this.serversPage()
       } else if (this.store.screen === 'chat') {
         this.chatPage()
       } else if (this.store.screen === 'new') {

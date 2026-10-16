@@ -982,8 +982,12 @@ export class CodexAdapter extends EventEmitter {
       else delete thread.activeTurnId;
     }
   }
-  async createThread(input: CreateThreadInput): Promise<ThreadSnapshot> {
+  async createThread(
+    input: CreateThreadInput,
+    assertAuthorized?: () => void,
+  ): Promise<ThreadSnapshot> {
     await this.validateSettings(input);
+    assertAuthorized?.();
     const r = record(
       await this.rpc(
         'thread/start',
@@ -997,6 +1001,7 @@ export class CodexAdapter extends EventEmitter {
     this.resumed.add(thread.id);
     if (input.effort || input.mode) {
       const overrides = await this.settingOverrides(thread.id, input);
+      assertAuthorized?.();
       const updated = record(
         await this.rpc('thread/settings/update', { threadId: thread.id, ...overrides }, true),
       );
@@ -1010,7 +1015,7 @@ export class CodexAdapter extends EventEmitter {
     }
     return this.snapshot(thread.id);
   }
-  async send(input: SendInput): Promise<unknown> {
+  async send(input: SendInput, assertAuthorized?: () => void): Promise<unknown> {
     if (!input.text.trim() && !input.imagePaths?.length)
       throw new CodexError('INVALID_INPUT', '请输入消息或选择图片');
     if (!this.resumed.has(input.threadId)) await this.subscribe(input.threadId);
@@ -1037,10 +1042,12 @@ export class CodexAdapter extends EventEmitter {
             'TURN_ACTIVE',
             '运行中的任务只能追加指令，模型、推理强度与模式请在任务结束后调整',
           );
+      assertAuthorized?.();
       const result = record(await this.rpc('turn/steer', { ...params, expectedTurnId }, true));
       return { turnId: str(result.turnId, expectedTurnId) };
     }
     const overrides = await this.settingOverrides(input.threadId, input);
+    assertAuthorized?.();
     const result = await this.rpc('turn/start', { ...params, ...overrides }, true);
     this.settings.set(input.threadId, {
       ...this.settings.get(input.threadId),

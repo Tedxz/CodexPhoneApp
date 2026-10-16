@@ -50,5 +50,5 @@ export function isSessionCookie(cookie: string): boolean {
 }
 
 export function safeImagePath(path: string): boolean {
-  return /^\/api\/v1\/uploads\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?$/.test(path);
+  return /^\/api\/v1\/(?:targets\/[a-zA-Z0-9_-]+\/)?uploads\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?$/.test(path);
 }

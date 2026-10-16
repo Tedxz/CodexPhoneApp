@@ -65,7 +65,13 @@ export function Markdown({ text }: { text: string }) {
     </div>
   );
 }
-export function Message({ item }: { item: ConversationItem }) {
+export function Message({
+  item,
+  targetId = 'local',
+}: {
+  item: ConversationItem;
+  targetId?: string;
+}) {
   const labels: Record<string, string> = {
     commandExecution: '命令执行',
     fileChange: '文件变更',
@@ -97,7 +103,7 @@ export function Message({ item }: { item: ConversationItem }) {
           <div className="image-grid">
             {item.images.map(
               (url, i) =>
-                safeImageUrl(url) && (
+                safeImageUrl(url, targetId) && (
                   <a href={url} target="_blank" rel="noreferrer" key={i}>
                     <img src={url} alt={`附图 ${i + 1}`} loading="lazy" />
                   </a>

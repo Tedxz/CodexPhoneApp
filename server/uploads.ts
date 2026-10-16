@@ -1,17 +1,29 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  unlinkSync,
+  renameSync,
+} from 'node:fs';
 import { join } from 'node:path';
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-interface Upload {
+export interface Upload {
   id: string;
   path: string;
   mime: string;
   createdAt: number;
   attached: boolean;
+  remotePath?: string;
+  remotePendingPath?: string;
 }
 export class UploadStore {
   private dir: string;
-  constructor(dataDir: string) {
+  constructor(
+    dataDir: string,
+    private readonly urlPrefix = '/api/v1/uploads',
+  ) {
     this.dir = join(dataDir, 'uploads');
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     this.cleanup();
@@ -37,7 +49,7 @@ export class UploadStore {
       JSON.stringify({ id, path, mime, createdAt: Date.now(), attached: false }),
       { mode: 0o600, flag: 'wx' },
     );
-    return { id, url: `/api/v1/uploads/${id}` };
+    return { id, url: `${this.urlPrefix}/${id}` };
   }
   get(id: string): Upload | undefined {
     if (!/^[a-f0-9-]{36}$/.test(id)) return undefined;
@@ -48,22 +60,62 @@ export class UploadStore {
     }
   }
   attach(ids: string[]): string[] {
-    const entries = ids.map((id) => {
-      const entry = this.get(id);
-      if (!entry) throw new Error('图片不存在，请重新上传');
-      return entry;
-    });
-    for (const entry of entries)
-      writeFileSync(
-        join(this.dir, entry.id + '.json'),
-        JSON.stringify({ ...entry, attached: true }),
-        { mode: 0o600 },
-      );
+    const entries = this.entries(ids);
+    for (const entry of entries) this.write({ ...entry, attached: true });
     return entries.map((entry) => entry.path);
   }
+  entries(ids: string[]): Upload[] {
+    return ids.map((id) => {
+      const entry = this.get(id);
+      if (!entry) throw new Error('图片不存在或属于其他机器，请重新上传');
+      return entry;
+    });
+  }
+  recordRemotePath(id: string, remotePath: string): void {
+    const [entry] = this.entries([id]);
+    const { remotePendingPath: _pending, ...stored } = entry;
+    this.write({ ...stored, remotePath });
+  }
+  recordRemotePendingPath(id: string, remotePendingPath: string): void {
+    const [entry] = this.entries([id]);
+    this.write({ ...entry, remotePendingPath });
+  }
+  attachRemote(ids: string[]): string[] {
+    const entries = this.entries(ids);
+    if (entries.some((entry) => !entry.remotePath)) throw new Error('远端图片尚未上传完成');
+    for (const entry of entries) this.write({ ...entry, attached: true });
+    return entries.map((entry) => entry.remotePath!);
+  }
+  expiredRemoteUploads(): Upload[] {
+    return this.all().filter(
+      (entry) =>
+        (entry.remotePath || entry.remotePendingPath) &&
+        !entry.attached &&
+        Date.now() - entry.createdAt > 86400_000,
+    );
+  }
+  remove(id: string): void {
+    const entry = this.get(id);
+    if (!entry || entry.attached) return;
+    unlinkSync(entry.path);
+    unlinkSync(join(this.dir, id + '.json'));
+  }
+  private write(entry: Upload): void {
+    const temp = join(this.dir, `${entry.id}.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temp, JSON.stringify(entry), { mode: 0o600, flag: 'wx' });
+      renameSync(temp, join(this.dir, entry.id + '.json'));
+    } finally {
+      try {
+        unlinkSync(temp);
+      } catch {
+        /* Already renamed. */
+      }
+    }
+  }
   urlForPath(path: string): string | undefined {
-    const entry = this.all().find((entry) => entry.path === path);
-    return entry ? `/api/v1/uploads/${entry.id}` : undefined;
+    const entry = this.all().find((entry) => entry.path === path || entry.remotePath === path);
+    return entry ? `${this.urlPrefix}/${entry.id}` : undefined;
   }
   private all(): Upload[] {
     return readdirSync(this.dir)
@@ -72,7 +124,12 @@ export class UploadStore {
   }
   private cleanup() {
     for (const item of this.all())
-      if (!item.attached && Date.now() - item.createdAt > 86400_000) {
+      if (
+        !item.attached &&
+        !item.remotePath &&
+        !item.remotePendingPath &&
+        Date.now() - item.createdAt > 86400_000
+      ) {
         try {
           unlinkSync(item.path);
           unlinkSync(join(this.dir, item.id + '.json'));

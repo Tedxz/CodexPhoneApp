@@ -6,8 +6,9 @@ import { randomUUID, createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Config } from './config.js';
 import { AuthError, AuthStore, PairingLimiter, sessionToken, sessionCookie } from './auth.js';
-import { UploadStore, MAX_IMAGE_BYTES } from './uploads.js';
+import { MAX_IMAGE_BYTES } from './uploads.js';
 import type { CodexAdapter } from './codex.js';
+import { TargetManager, type TargetRuntime } from './targets.js';
 import type {
   ConversationItem,
   ClientType,
@@ -16,6 +17,7 @@ import type {
   RequestAnswer,
   SessionSettings,
   ThreadSnapshot,
+  TargetSummary,
 } from '../shared/protocol.js';
 
 class HttpError extends Error {
@@ -62,18 +64,29 @@ function json(res: ServerResponse, status: number, value: unknown) {
   res.end(JSON.stringify(value));
 }
 
-export function createGateway(config: Config, codex: CodexAdapter) {
+export function createGateway(
+  config: Config,
+  backend: CodexAdapter | Pick<TargetManager, 'all' | 'get' | 'close'>,
+) {
+  const targets = 'all' in backend ? backend : new TargetManager(config, backend);
   const auth = new AuthStore(config.dataDir);
-  const uploads = new UploadStore(config.dataDir);
   const limiter = new PairingLimiter();
   const origins = new Set(config.allowedOrigins);
   const hosts = new Set(config.allowedOrigins.map((x) => new URL(x).host));
   const secure = config.publicUrl.startsWith('https:') || !!config.tls;
-  const epoch = randomUUID();
-  let seq = 0;
+  const cursors = new Map(
+    targets.all().map((target) => [target.id, { epoch: randomUUID(), seq: 0 }]),
+  );
   const clients = new Map<
     WebSocket,
-    { token: string; device: Device; threads: Set<string>; busy: number; alive: boolean }
+    {
+      token: string;
+      device: Device;
+      target: TargetRuntime;
+      legacy: boolean;
+      busy: number;
+      alive: boolean;
+    }
   >();
   const rpcCache = new Map<
     string,
@@ -92,11 +105,50 @@ export function createGateway(config: Config, codex: CodexAdapter) {
     if (!device) throw new HttpError(401, '请先配对设备', 'UNAUTHORIZED');
     return device;
   }
-  function itemForBrowser(item: ConversationItem): ConversationItem {
-    return { ...item, images: item.images?.flatMap((path) => uploads.urlForPath(path) ?? []) };
+  function targetSummary(target: TargetRuntime): TargetSummary {
+    return {
+      id: target.id,
+      name: target.name,
+      kind: target.kind,
+      connection: target.connection,
+      capabilities: target.capabilities,
+    };
   }
-  function snapshotForBrowser(snapshot: ThreadSnapshot) {
-    return { ...snapshot, items: snapshot.items.map(itemForBrowser), eventCursor: { epoch, seq } };
+  function targetFor(id: string): TargetRuntime {
+    const target = targets.get(id);
+    if (!target) throw new HttpError(404, '目标机器不存在', 'TARGET_NOT_FOUND');
+    return target;
+  }
+  function requireBackend(target: TargetRuntime): void {
+    const connection = target.connection;
+    if (!connection.connected)
+      throw new HttpError(503, connection.message, connection.errorCode || 'BACKEND_UNAVAILABLE');
+  }
+  function imageUrl(target: TargetRuntime, id: string, legacy: boolean): string {
+    return legacy
+      ? `/api/v1/uploads/${id}`
+      : `/api/v1/targets/${encodeURIComponent(target.id)}/uploads/${id}`;
+  }
+  function itemForBrowser(
+    item: ConversationItem,
+    target: TargetRuntime,
+    legacy: boolean,
+  ): ConversationItem {
+    return {
+      ...item,
+      images: item.images?.flatMap((path) => {
+        const stored = target.uploads.urlForPath(path);
+        const id = stored?.match(/\/uploads\/([a-f0-9-]{36})$/)?.[1];
+        return id ? [imageUrl(target, id, legacy)] : [];
+      }),
+    };
+  }
+  function snapshotForBrowser(snapshot: ThreadSnapshot, target: TargetRuntime, legacy: boolean) {
+    return {
+      ...snapshot,
+      items: snapshot.items.map((item) => itemForBrowser(item, target, legacy)),
+      eventCursor: { ...cursors.get(target.id)! },
+    };
   }
   function send(ws: WebSocket, message: unknown) {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -110,18 +162,32 @@ export function createGateway(config: Config, codex: CodexAdapter) {
     for (const [ws, client] of clients)
       if (!auth.authenticate(client.token)) ws.close(4001, 'Device revoked or expired');
   }
-  const onEvent = (event: GatewayEvent) => {
-    const safeEvent =
-      event.type === 'item.updated' ? { ...event, item: itemForBrowser(event.item) } : event;
-    // All clients receive the same sequence, so filtered subscriptions cannot create false gaps.
-    const message = { type: 'event', epoch, seq: ++seq, event: safeEvent };
-    for (const [ws, client] of clients)
-      if (auth.authenticate(client.token)) send(ws, message);
-      else ws.close(4001);
-  };
-  codex.on('event', onEvent);
+  const listeners = targets.all().map((target) => {
+    const onEvent = (event: GatewayEvent) => {
+      const cursor = cursors.get(target.id)!;
+      cursor.seq++;
+      // Each target is an independent stream. Legacy and scoped clients for local share its cursor.
+      for (const [ws, client] of clients) {
+        if (client.target.id !== target.id) continue;
+        if (!auth.authenticate(client.token)) {
+          ws.close(4001);
+          continue;
+        }
+        const safeEvent =
+          event.type === 'item.updated'
+            ? { ...event, item: itemForBrowser(event.item, target, client.legacy) }
+            : event.type === 'connection'
+              ? { ...event, connection: target.connection }
+              : event;
+        send(ws, { type: 'event', ...cursor, event: safeEvent });
+      }
+    };
+    target.codex.on('event', onEvent);
+    return { target, onEvent };
+  });
 
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
+    let selectedTarget: TargetRuntime | undefined;
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store');
@@ -133,7 +199,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
     try {
       validateOrigin(req);
       const url = new URL(req.url || '/', config.publicUrl);
-      const path = url.pathname;
+      let path = url.pathname;
       const method = req.method || 'GET';
       if (!['GET', 'HEAD'].includes(method)) {
         validateOrigin(req, true);
@@ -177,13 +243,6 @@ export function createGateway(config: Config, codex: CodexAdapter) {
           if (!identified) throw new HttpError(401, '请先配对客户端', 'UNAUTHORIZED');
           return json(res, 200, { device: identified });
         }
-        if (path === '/api/v1/bootstrap' && method === 'GET')
-          return json(res, 200, {
-            device,
-            projects: config.projects,
-            connection: codex.connection,
-            capabilities: codex.capabilities,
-          });
         if (path === '/api/v1/logout' && method === 'POST') {
           auth.revokeSession(sessionToken(req.headers.cookie));
           revokeSockets();
@@ -200,6 +259,25 @@ export function createGateway(config: Config, codex: CodexAdapter) {
           revokeSockets();
           return json(res, 200, { ok: true });
         }
+        if (path === '/api/v1/targets' && method === 'GET')
+          return json(res, 200, { data: targets.all().map(targetSummary) });
+        const targetMatch = /^\/api\/v1\/targets\/([^/]+)(\/.*)$/.exec(path);
+        const legacy = !targetMatch;
+        selectedTarget = targetFor(targetMatch ? decodeURIComponent(targetMatch[1]) : 'local');
+        const target = selectedTarget;
+        const codex = target.codex;
+        const uploads = target.uploads;
+        if (targetMatch) path = '/api/v1' + targetMatch[2];
+        if (path === '/api/v1/bootstrap' && method === 'GET')
+          return json(res, 200, {
+            device,
+            projects: target.projects,
+            connection: target.connection,
+            capabilities: target.capabilities,
+            ...(!legacy ? { target: targetSummary(target) } : {}),
+          });
+        if (method === 'GET' && /^\/api\/v1\/(workspaces|models|threads(?:\/[^/]+)?)$/.test(path))
+          requireBackend(target);
         if (path === '/api/v1/workspaces' && method === 'GET')
           return json(res, 200, { data: await codex.listWorkspaces() });
         if (path === '/api/v1/threads' && method === 'GET')
@@ -222,6 +300,8 @@ export function createGateway(config: Config, codex: CodexAdapter) {
                 decodeURIComponent(threadMatch[1]),
                 url.searchParams.get('cursor') || undefined,
               ),
+              target,
+              legacy,
             ),
           );
         if (path === '/api/v1/models' && method === 'GET')
@@ -229,7 +309,8 @@ export function createGateway(config: Config, codex: CodexAdapter) {
         if (path === '/api/v1/uploads' && method === 'POST') {
           const bytes = await body(req, MAX_IMAGE_BYTES);
           try {
-            return json(res, 201, uploads.save(bytes, req.headers['content-type'] || ''));
+            const saved = uploads.save(bytes, req.headers['content-type'] || '');
+            return json(res, 201, { ...saved, url: imageUrl(target, saved.id, legacy) });
           } catch (e) {
             throw new HttpError(400, (e as Error).message);
           }
@@ -280,7 +361,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
           ? error.status
           : error instanceof SyntaxError || error instanceof URIError
             ? 400
-            : !codex.connection.connected
+            : selectedTarget && !selectedTarget.connection.connected
               ? 503
               : 500;
       json(res, status, {
@@ -307,12 +388,15 @@ export function createGateway(config: Config, codex: CodexAdapter) {
   server.on('upgrade', (req, socket, head) => {
     try {
       validateOrigin(req, true);
-      if (req.url !== '/api/v1/ws') throw new HttpError(404, 'Not found');
       const device = deviceFor(req);
+      const targetMatch = /^\/api\/v1\/targets\/([^/]+)\/ws$/.exec(req.url || '');
+      const legacy = req.url === '/api/v1/ws';
+      if (!legacy && !targetMatch) throw new HttpError(404, 'Not found');
+      const target = targetFor(legacy ? 'local' : decodeURIComponent(targetMatch![1]));
       const token = sessionToken(req.headers.cookie)!;
       if (clients.size >= 12) throw new HttpError(429, '连接数过多');
       wss.handleUpgrade(req, socket, head, (ws) => {
-        const client = { device, token, threads: new Set<string>(), busy: 0, alive: true };
+        const client = { device, token, target, legacy, busy: 0, alive: true };
         clients.set(ws, client);
         ws.on('error', () => {});
         ws.on('close', () => clients.delete(ws));
@@ -328,9 +412,8 @@ export function createGateway(config: Config, codex: CodexAdapter) {
         });
         send(ws, {
           type: 'event',
-          epoch,
-          seq,
-          event: { type: 'connection', connection: codex.connection },
+          ...cursors.get(target.id)!,
+          event: { type: 'connection', connection: target.connection },
         });
         ws.on('message', async (data) => {
           let id = '';
@@ -346,7 +429,7 @@ export function createGateway(config: Config, codex: CodexAdapter) {
             if (client.busy >= 8) throw new HttpError(429, '操作过于频繁');
             const method = text(request.method, '方法', 50);
             const params = object(request.params);
-            const cacheKey = current.id + ':' + id;
+            const cacheKey = JSON.stringify([current.id, target.id, id]);
             const digest = createHash('sha256')
               .update(JSON.stringify({ method, params }))
               .digest('hex');
@@ -358,13 +441,31 @@ export function createGateway(config: Config, codex: CodexAdapter) {
             if (!cached) {
               if (rpcCache.size >= 10000) throw new HttpError(429, '请求容量已满，请稍后重试');
               client.busy++;
-              const promise = command(method, params).finally(() => {
+              const promise = command(target, method, params, () => {
+                if (!auth.authenticate(token))
+                  throw new HttpError(401, '客户端授权已失效，尚未发送消息', 'UNAUTHORIZED');
+              }).finally(() => {
                 client.busy--;
               });
               cached = { digest, promise, createdAt: Date.now() };
               rpcCache.set(cacheKey, cached);
             }
-            send(ws, { id, result: await cached.promise });
+            const result = await cached.promise;
+            // Cache one canonical result so a retry across legacy/scoped local
+            // connections cannot execute a mutation twice or return the wrong URL namespace.
+            const response =
+              legacy && (method === 'thread.subscribe' || method === 'thread.create')
+                ? {
+                    ...(result as ThreadSnapshot),
+                    items: (result as ThreadSnapshot).items.map((item) => ({
+                      ...item,
+                      images: item.images?.map((url) =>
+                        url.replace('/api/v1/targets/local/uploads/', '/api/v1/uploads/'),
+                      ),
+                    })),
+                  }
+                : result;
+            send(ws, { id, result: response });
           } catch (error) {
             const e = error as Error & { code?: string };
             send(ws, {
@@ -380,13 +481,28 @@ export function createGateway(config: Config, codex: CodexAdapter) {
       );
     }
   });
-  async function command(method: string, p: Record<string, unknown>): Promise<unknown> {
+  async function command(
+    target: TargetRuntime,
+    method: string,
+    p: Record<string, unknown>,
+    assertAuthorized: () => void,
+  ): Promise<unknown> {
+    requireBackend(target);
+    const assertReady = () => {
+      assertAuthorized();
+      requireBackend(target);
+    };
+    const codex = target.codex;
     if (method === 'thread.subscribe')
-      return snapshotForBrowser(await codex.subscribe(text(p.threadId, '会话 ID')));
+      return snapshotForBrowser(await codex.subscribe(text(p.threadId, '会话 ID')), target, false);
     if (method === 'thread.create') {
-      const project = config.projects.find((x) => x.id === p.projectId);
+      const project = target.projects.find((x) => x.id === p.projectId);
       if (!project) throw new HttpError(400, '请选择已配置的项目');
-      return snapshotForBrowser(await codex.createThread({ cwd: project.path, ...settings(p) }));
+      return snapshotForBrowser(
+        await codex.createThread({ cwd: project.path, ...settings(p) }, assertReady),
+        target,
+        false,
+      );
     }
     if (method === 'turn.send') {
       const threadId = text(p.threadId, '会话 ID');
@@ -396,20 +512,32 @@ export function createGateway(config: Config, codex: CodexAdapter) {
       if (!Array.isArray(ids) || ids.length > 8 || ids.some((x) => typeof x !== 'string'))
         throw new HttpError(400, '图片列表无效，最多 8 张');
       if (!message && !ids.length) throw new HttpError(400, '请输入消息或添加图片');
-      if (commandLocks.has(threadId))
+      const lockKey = JSON.stringify([target.id, threadId]);
+      if (commandLocks.has(lockKey))
         throw new HttpError(409, '会话正在处理另一条发送请求，请同步状态后重试');
-      commandLocks.add(threadId);
+      commandLocks.add(lockKey);
       try {
-        return await codex.send({
-          threadId,
-          text: message,
-          imagePaths: uploads.attach(ids),
-          expectedTurnId:
-            p.expectedTurnId === undefined ? undefined : text(p.expectedTurnId, '轮次 ID'),
-          ...settings(p),
-        });
+        if (ids.length && !target.capabilities.images)
+          throw new HttpError(
+            409,
+            '该机器的图片传输暂不可用，请检查连接配置',
+            'IMAGES_UNAVAILABLE',
+          );
+        const imagePaths = await target.prepareImages(ids);
+        assertReady();
+        return await codex.send(
+          {
+            threadId,
+            text: message,
+            imagePaths,
+            expectedTurnId:
+              p.expectedTurnId === undefined ? undefined : text(p.expectedTurnId, '轮次 ID'),
+            ...settings(p),
+          },
+          assertReady,
+        );
       } finally {
-        commandLocks.delete(threadId);
+        commandLocks.delete(lockKey);
       }
     }
     if (method === 'turn.interrupt')
@@ -466,10 +594,10 @@ export function createGateway(config: Config, codex: CodexAdapter) {
     async close() {
       clearInterval(heartbeat);
       authWatcher?.close();
-      codex.off('event', onEvent);
+      for (const { target, onEvent } of listeners) target.codex.off('event', onEvent);
       for (const ws of clients.keys()) ws.terminate();
       wss.close();
-      codex.close();
+      await targets.close();
       if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

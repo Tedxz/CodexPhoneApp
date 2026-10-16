@@ -1,0 +1,15 @@
+{
+  "realCodexWrites": 0,
+  "scenarios": [
+    "same thread / workspace / approval / upload ids remain isolated, drafts and attachments survive switching",
+    "switching during unconfirmed mutation preserves old draft and never resends to either target",
+    "late upload after machine switch cannot add an attachment to the new machine",
+    "late 401 from old target cannot erase the current machine session",
+    "offline machine stays selectable with a diagnostic while other machines remain usable",
+    "selected target and per-target text drafts survive a page reload"
+  ],
+  "status": "passed",
+  "consoleErrors": [],
+  "commandCount": 12,
+  "fixtureMutationCount": 2
+}

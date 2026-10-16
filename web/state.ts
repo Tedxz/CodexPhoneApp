@@ -150,27 +150,48 @@ export class EventCursor {
   }
 }
 
-export function safeImageUrl(value: string): string | undefined {
-  return /^\/api\/v1\/uploads\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?$/.test(value) ? value : undefined;
+export function safeImageUrl(value: string, targetId = 'local'): string | undefined {
+  const match =
+    /^\/api\/v1\/(?:targets\/([a-z0-9_-]+)\/)?uploads\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?$/.exec(
+      value,
+    );
+  return match && (match[1] || 'local') === targetId ? value : undefined;
 }
 
 export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : '操作失败，请重试。';
 }
 
-export function readDraft(threadId: string): string {
+function draftKey(threadId: string, targetId: string): string {
+  return `codex-phone:draft:v2:${JSON.stringify([targetId, threadId])}`;
+}
+
+export function readDraft(threadId: string, targetId = 'local'): string {
   try {
-    return sessionStorage.getItem(`codex-phone:draft:${threadId}`) || '';
+    const key = draftKey(threadId, targetId);
+    const saved = sessionStorage.getItem(key);
+    if (saved !== null) return saved;
+    // Browser storage already isolates Server origins. Only the local target may
+    // adopt drafts created before the target dimension was introduced.
+    if (targetId !== 'local') return '';
+    const oldKey = `codex-phone:draft:${threadId}`;
+    const previous = sessionStorage.getItem(oldKey) || '';
+    if (previous) {
+      sessionStorage.setItem(key, previous);
+      sessionStorage.removeItem(oldKey);
+    }
+    return previous;
   } catch {
     return '';
   }
 }
 
-export function storeDraft(threadId: string, draft: string): void {
+export function storeDraft(threadId: string, draft: string, targetId = 'local'): void {
   try {
     draft
-      ? sessionStorage.setItem(`codex-phone:draft:${threadId}`, draft)
-      : sessionStorage.removeItem(`codex-phone:draft:${threadId}`);
+      ? sessionStorage.setItem(draftKey(threadId, targetId), draft)
+      : sessionStorage.removeItem(draftKey(threadId, targetId));
+    if (targetId === 'local') sessionStorage.removeItem(`codex-phone:draft:${threadId}`);
   } catch {
     /* Storage is optional. */
   }

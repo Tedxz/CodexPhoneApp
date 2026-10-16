@@ -1,0 +1,25 @@
+{
+  "checkedAt": "2026-10-16T02:28:25.629Z",
+  "url": "https://xz-macbookair.tail9ddfa1.ts.net",
+  "anonymousDenied": true,
+  "legacyLocalApi": true,
+  "targets": [
+    {
+      "id": "local",
+      "connected": true,
+      "images": true,
+      "httpsBootstrap": true,
+      "httpsThreads": true,
+      "wss": true
+    },
+    {
+      "id": "xz-catl",
+      "connected": true,
+      "images": true,
+      "httpsBootstrap": true,
+      "httpsThreads": true,
+      "wss": true
+    }
+  ],
+  "preservedPreviousAuthorizations": true
+}

@@ -1,13 +1,14 @@
+import { util } from '@kit.ArkTS';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { image } from '@kit.ImageKit';
-import { Attachment, Bootstrap, Device, EventEnvelope, ModelOption, Project, QuestionAnswer, SessionSettings, ThreadSnapshot, ThreadSummary, WorkspaceSummary } from '../model/Protocol';
+import { Attachment, Bootstrap, Device, EventEnvelope, ModelOption, Project, QuestionAnswer, SessionSettings, ThreadSnapshot, ThreadSummary, WorkspaceSummary, TargetSummary, ConnectionState, Capabilities } from '../model/Protocol';
 import { applyEvent, SnapshotTracker } from '../model/State';
 import { GatewayApi, GatewayError } from '../transport/GatewayApi';
 import { NativeLiveClient, LiveHandlers } from '../transport/NativeLiveClient';
-import { AuthSession, SessionVault } from '../transport/SessionVault';
+import { ServerProfile, SessionVault } from '../transport/SessionVault';
 import { parseConnectionInput, safeImagePath } from '../transport/Endpoint';
 
 interface ThreadCommand { threadId: string }
@@ -22,7 +23,56 @@ interface InterruptCommand { threadId: string; turnId: string }
 interface AnswerCommand { requestId: string; decision?: string; answers?: Record<string, string[]> }
 
 @Observed
+export class TargetEntry implements TargetSummary {
+  id: string;
+  name: string;
+  kind: 'local' | 'ssh';
+  connection: ConnectionState;
+  capabilities: Capabilities;
+
+  constructor(target: TargetSummary) {
+    this.id = target.id;
+    this.name = target.name;
+    this.kind = target.kind;
+    this.connection = target.connection;
+    this.capabilities = target.capabilities;
+  }
+
+  update(target: TargetSummary): void {
+    this.name = target.name;
+    this.kind = target.kind;
+    this.connection = target.connection;
+    this.capabilities = target.capabilities;
+  }
+}
+
+@Observed
+export class ServerEntry {
+  profile: ServerProfile;
+  targets: TargetEntry[] = [];
+  legacy: boolean = false;
+  loading: boolean = false;
+  error: string = '';
+  checkedAt: number = 0;
+  constructor(profile: ServerProfile) { this.profile = profile; }
+
+  updateTargets(targets: TargetSummary[]): void {
+    this.targets = targets.map((target: TargetSummary): TargetEntry => {
+      const existing = this.targets.find((entry: TargetEntry) => entry.id === target.id);
+      if (!existing) return new TargetEntry(target);
+      existing.update(target);
+      return existing;
+    });
+  }
+}
+
+@Observed
 export class AppStore {
+  servers: ServerEntry[] = [];
+  serverName: string = '';
+  editingServerId: string = '';
+  activeServerId: string = '';
+  activeTargetId: string = '';
   endpoint: string = '';
   pairToken: string = '';
   deviceName: string = '我的鸿蒙手机';
@@ -37,7 +87,7 @@ export class AppStore {
   olderBusy: boolean = false;
   sending: boolean = false;
   uploading: boolean = false;
-  screen: string = 'threads';
+  screen: string = 'servers';
   mode: string = 'workspaces';
   workspace: string | null = null;
   search: string = '';
@@ -55,6 +105,12 @@ export class AppStore {
   imageVersion: number = 0;
   onTimelineChanged: () => void = () => {};
   private selectionVersion: number = 0;
+  private overviewTimer: number = -1;
+  private overviewTask: Promise<void> | undefined = undefined;
+  private catalogVersion: number = 0;
+  private formVersion: number = 0;
+  private switchVersion: number = 0;
+  private foregroundActive: boolean = true;
 
   private context: common.UIAbilityContext | undefined = undefined;
   private drafts: preferences.Preferences | undefined = undefined;
@@ -73,14 +129,24 @@ export class AppStore {
   private refreshTask: Promise<void> | undefined = undefined;
   private refreshAgain: boolean = false;
   private attachmentDrafts: Map<string, Attachment[]> = new Map();
+  private commandNotices: Map<string, string> = new Map();
   private imageCache: Map<string, string> = new Map();
   private imagePending: Set<string> = new Set();
   private foreground: () => void = () => this.onForeground();
-  private background: () => void = () => { void this.flushDraft(); };
+  private background: () => void = () => {
+    this.foregroundActive = false;
+    clearTimeout(this.overviewTimer);
+    void this.flushDraft();
+  };
 
   get ready(): boolean { return this.live && this.boot?.connection.connected === true; }
   get hasSavedConnection(): boolean { return !!this.api?.cookie; }
   get projects(): Project[] { return this.boot?.projects || []; }
+  get contextTitle(): string {
+    const server = this.servers.find((item: ServerEntry) => item.profile.id === this.activeServerId);
+    const target = server?.targets.find((item: TargetSummary) => item.id === this.activeTargetId);
+    return `${server?.profile.name || this.api?.origin || ''} · ${target?.name || this.activeTargetId || '本机'}`;
+  }
 
   async initialize(context: common.UIAbilityContext): Promise<void> {
     if (this.context) return;
@@ -89,12 +155,10 @@ export class AppStore {
     context.eventHub.on('codex:background', this.background);
     try {
       this.drafts = await preferences.getPreferences(context, 'codex_phone_drafts');
-      const saved = await this.vault.load();
-      if (saved) {
-        this.endpoint = saved.origin;
-        this.deviceName = saved.deviceName;
-        await this.activate(new GatewayApi(saved.origin, saved.cookie));
-      }
+      this.servers = (await this.vault.list()).map((profile: ServerProfile) => new ServerEntry(profile));
+      this.screen = this.servers.length > 0 ? 'servers' : 'pair';
+      this.checked = true;
+      await this.refreshOverview();
     } catch (caught) { await this.fail(caught as Error); }
     finally { this.checked = true; }
   }
@@ -104,6 +168,9 @@ export class AppStore {
     this.context?.eventHub.off('codex:foreground', this.foreground);
     this.context?.eventHub.off('codex:background', this.background);
     this.client?.close();
+    this.foregroundActive = false;
+    this.catalogVersion++;
+    clearTimeout(this.overviewTimer);
     clearTimeout(this.searchTimer);
     clearTimeout(this.workspaceTimer);
     this.listVersion++;
@@ -111,8 +178,72 @@ export class AppStore {
   }
 
   onForeground(): void {
+    this.foregroundActive = true;
+    if (this.checked) void this.refreshOverview();
     this.client?.connect();
     void this.refresh();
+  }
+
+  editServer(id: string = ''): void {
+    clearTimeout(this.overviewTimer);
+    this.formVersion++;
+    const profile = this.servers.find((item: ServerEntry) => item.profile.id === id)?.profile;
+    this.editingServerId = id;
+    this.serverName = profile?.name || '';
+    this.endpoint = profile?.origin || '';
+    this.deviceName = profile?.deviceName || this.deviceName;
+    this.pairToken = '';
+    this.error = '';
+    this.screen = 'pair';
+  }
+
+  async saveServer(): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    const form = this.formVersion;
+    try {
+      const origin = parseConnectionInput(this.endpoint).origin;
+      const previous = this.servers.find((entry: ServerEntry) => entry.profile.id === this.editingServerId)?.profile;
+      if (this.servers.some((entry: ServerEntry) => entry.profile.origin === origin && entry.profile.id !== this.editingServerId)) {
+        throw new Error('这个 Server 地址已经保存，请编辑已有连接。');
+      }
+      const sameOrigin = previous?.origin === origin;
+      if (previous && !sameOrigin) throw new Error('更换地址请填写新地址的配对凭据，并点击“配对并保存”；配对成功前保留原连接。');
+      const profile = new ServerProfile(sameOrigin ? previous!.id : util.generateRandomUUID(true), origin,
+        sameOrigin ? previous!.cookie : '', this.deviceName, this.serverName, sameOrigin ? previous!.lastTargetId : 'local');
+      await this.vault.saveProfile(profile);
+      if (form !== this.formVersion) return;
+      await this.replaceProfile(profile, previous);
+      await this.showServers();
+    } catch (caught) { if (form === this.formVersion) this.error = (caught as Error).message; }
+    finally { if (form === this.formVersion) this.busy = false; }
+  }
+
+  private async replaceProfile(profile: ServerProfile, previous?: ServerProfile): Promise<void> {
+    if (previous && previous.id !== profile.id) await this.vault.remove(previous.id);
+    this.catalogVersion++;
+    const existing = this.servers.find((entry: ServerEntry) => entry.profile.id === profile.id);
+    if (existing) {
+      existing.profile = profile;
+      existing.error = '';
+      this.servers = this.servers.slice();
+    } else {
+      this.servers = this.servers.filter((entry: ServerEntry) => entry.profile.id !== previous?.id).concat([new ServerEntry(profile)]);
+    }
+  }
+
+  async removeServer(id: string): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      await this.vault.remove(id);
+      this.catalogVersion++;
+      this.servers = this.servers.filter((entry: ServerEntry) => entry.profile.id !== id);
+      if (this.activeServerId === id) await this.leaveContext();
+      this.screen = 'servers';
+      this.notice = '已从手机移除 Server。网关上的客户端授权可在对应 Server 中撤销。';
+    } catch (caught) { this.error = (caught as Error).message; }
+    finally { this.busy = false; }
   }
 
   async pair(): Promise<void> {
@@ -120,21 +251,137 @@ export class AppStore {
     this.busy = true;
     this.error = '';
     this.notice = '';
+    const form = this.formVersion;
     try {
       const input = parseConnectionInput(this.pairToken.trim().startsWith('http') ? this.pairToken.trim() : this.endpoint);
       const token = input.token || this.pairToken.trim();
+      const name = this.serverName;
+      const deviceName = this.deviceName;
+      const previous = this.servers.find((entry: ServerEntry) => entry.profile.id === this.editingServerId)?.profile;
+      const duplicate = this.servers.find((entry: ServerEntry) => entry.profile.origin === input.origin && entry.profile.id !== previous?.id);
+      if (duplicate && previous) throw new Error('这个 Server 地址已经保存，请编辑已有连接。');
       const saved = await this.vault.loadOrigin(input.origin);
-      const cookie = this.api?.origin === input.origin ? this.api.cookie : (saved?.cookie || '');
-      const api = new GatewayApi(input.origin, cookie);
+      const api = new GatewayApi(input.origin, saved?.cookie || '');
       const clientKey = await this.vault.clientKey();
-      const device = await api.pair(token, this.deviceName, clientKey);
+      if (form !== this.formVersion) return;
+      const device = await api.pair(token, deviceName, clientKey);
+      if (form !== this.formVersion) return;
+      const existing = previous?.origin === input.origin ? previous : duplicate?.profile;
+      const profile = new ServerProfile(existing?.id || util.generateRandomUUID(true), api.origin, api.cookie,
+        device.name, name || existing?.name || api.origin, existing?.lastTargetId || 'local');
+      await this.vault.saveProfile(profile);
+      if (form !== this.formVersion) return;
       this.endpoint = api.origin;
       this.pairToken = '';
-      try { await this.vault.save(new AuthSession(api.origin, api.cookie, device.name)); }
-      catch (caught) { this.notice = (caught as Error).message; }
+      await this.replaceProfile(profile, previous);
+      await this.showServers();
+    } catch (caught) { if (form === this.formVersion) this.error = (caught as Error).message; }
+    finally { if (form === this.formVersion) this.busy = false; }
+  }
+
+  async refreshOverview(): Promise<void> {
+    if (!this.foregroundActive || this.screen !== 'servers') return;
+    if (this.overviewTask) return this.overviewTask;
+    clearTimeout(this.overviewTimer);
+    const version = this.catalogVersion;
+    const entries = this.servers.slice();
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < entries.length && this.foregroundActive && this.screen === 'servers' && version === this.catalogVersion) {
+        const entry = entries[next++];
+        await this.probeServer(entry, version);
+      }
+    };
+    const task = Promise.all([worker(), worker(), worker(), worker()]).then(() => {});
+    this.overviewTask = task;
+    try { await task; }
+    finally {
+      if (this.overviewTask === task) {
+        this.overviewTask = undefined;
+        if (this.foregroundActive && this.screen === 'servers') this.overviewTimer = setTimeout(() => { void this.refreshOverview(); }, version === this.catalogVersion ? 10000 : 0);
+      }
+    }
+  }
+
+  private async probeServer(entry: ServerEntry, version: number): Promise<void> {
+    if (!entry.profile.cookie) { entry.error = '需要配对'; this.servers = this.servers.slice(); return; }
+    entry.loading = true;
+    this.servers = this.servers.slice();
+    const api = new GatewayApi(entry.profile.origin, entry.profile.cookie);
+    try {
+      let targets: TargetSummary[];
+      let legacy = false;
+      try { targets = (await api.targets()).data; }
+      catch (caught) {
+        if (!(caught instanceof GatewayError) || caught.status !== 404) throw caught as Error;
+        const boot = await api.bootstrap(5000);
+        targets = [{ id: 'local', name: '本机', kind: 'local', connection: boot.connection, capabilities: boot.capabilities }];
+        legacy = true;
+      }
+      if (!Array.isArray(targets)) throw new Error('Server 机器列表格式无效。');
+      if (version !== this.catalogVersion || !this.servers.includes(entry)) return;
+      entry.updateTargets(targets);
+      entry.legacy = legacy;
+      entry.error = '';
+      entry.checkedAt = Date.now();
+    } catch (caught) {
+      if (version !== this.catalogVersion || !this.servers.includes(entry)) return;
+      entry.error = (caught as Error).message;
+      if (caught instanceof GatewayError && caught.status === 401) {
+        const profile = entry.profile;
+        try { await this.vault.clear(profile.origin, api.cookie); }
+        catch (failure) { entry.error = (failure as Error).message; return; }
+        if (version !== this.catalogVersion || !this.servers.includes(entry)) return;
+        entry.profile = new ServerProfile(profile.id, profile.origin, '', profile.deviceName, profile.name, profile.lastTargetId, profile.updatedAt);
+        entry.error = '登录已失效，请重新配对';
+      }
+    } finally {
+      if (version === this.catalogVersion && this.servers.includes(entry)) { entry.loading = false; this.servers = this.servers.slice(); }
+    }
+  }
+
+  async chooseTarget(serverId: string, targetId: string): Promise<void> {
+    const switching = ++this.switchVersion;
+    clearTimeout(this.overviewTimer);
+    const entry = this.servers.find((item: ServerEntry) => item.profile.id === serverId);
+    if (!entry || !entry.targets.some((target: TargetSummary) => target.id === targetId)) return;
+    if (!entry.profile.cookie) { this.editServer(serverId); return; }
+    await this.leaveContext();
+    if (switching !== this.switchVersion || !this.servers.includes(entry)) return;
+    this.activeServerId = serverId;
+    this.activeTargetId = targetId;
+    this.endpoint = entry.profile.origin;
+    this.screen = 'threads';
+    const api = new GatewayApi(entry.profile.origin, entry.profile.cookie, targetId, entry.legacy);
+    const revision = this.authVersion;
+    try {
       await this.activate(api);
-    } catch (caught) { await this.fail(caught as Error); }
-    finally { this.busy = false; }
+      if (this.api === api && switching === this.switchVersion) {
+        const profile = entry.profile;
+        const updated = new ServerProfile(profile.id, profile.origin, profile.cookie, profile.deviceName, profile.name, targetId);
+        try { await this.vault.saveProfile(updated); }
+        catch (caught) { if (this.api === api) this.notice = (caught as Error).message; }
+        if (this.api === api && this.servers.includes(entry)) entry.profile = updated;
+      }
+    }
+    catch (caught) { if (this.api === api && revision + 1 === this.authVersion) await this.fail(caught as Error); }
+  }
+
+  async showServers(): Promise<void> {
+    const switching = ++this.switchVersion;
+    this.formVersion++;
+    await this.leaveContext();
+    if (switching !== this.switchVersion) return;
+    this.screen = 'servers';
+    this.busy = false;
+    void this.refreshOverview();
+  }
+
+  back(): void {
+    if (this.screen === 'servers') return;
+    if (this.screen === 'pair' || (this.screen === 'threads' && this.workspace === null)) { void this.showServers(); return; }
+    if (this.screen === 'threads') { this.selectWorkspace(null); return; }
+    this.backToThreads();
   }
 
   private async activate(api: GatewayApi): Promise<void> {
@@ -191,7 +438,7 @@ export class AppStore {
   }
 
   async refresh(): Promise<void> {
-    if (!this.api) return;
+    if (!this.api || this.screen === 'servers') { await this.refreshOverview(); return; }
     if (this.refreshTask) { this.refreshAgain = true; return this.refreshTask; }
     const revision = this.authVersion;
     const task = this.refreshNow(revision);
@@ -316,17 +563,26 @@ export class AppStore {
     const revision = this.authVersion;
     await this.flushDraft();
     if (selection !== this.selectionVersion || revision !== this.authVersion) return;
-    if (this.selected) this.attachmentDrafts.set(this.selected, this.attachments);
+    if (this.selected) this.attachmentDrafts.set(this.draftKey(this.selected), this.attachments);
     this.selected = id;
     this.snapshot = undefined;
     this.loading = true;
     this.screen = 'chat';
     this.error = '';
-    this.notice = '';
+    this.notice = this.commandNotices.get(this.draftKey(id)) || '';
     this.draft = '';
-    this.attachments = this.attachmentDrafts.get(id) || [];
+    this.attachments = this.attachmentDrafts.get(this.draftKey(id)) || [];
     try {
-      const draft = await this.drafts?.get(this.draftKey(id), '');
+      let draft = await this.drafts?.get(this.draftKey(id), '');
+      if (!draft && this.activeTargetId === 'local') {
+        const legacyKey = `${this.api?.origin || ''}|${id}`;
+        draft = await this.drafts?.get(legacyKey, '');
+        if (draft && selection === this.selectionVersion && revision === this.authVersion) {
+          await this.drafts?.put(this.draftKey(id), draft);
+          await this.drafts?.delete(legacyKey);
+          await this.drafts?.flush();
+        }
+      }
       if (this.selected !== id || selection !== this.selectionVersion || revision !== this.authVersion) return;
       this.draft = typeof draft === 'string' ? draft : '';
       await this.syncSnapshot();
@@ -385,15 +641,18 @@ export class AppStore {
     clearTimeout(this.draftTimer);
     this.draftTimer = setTimeout(() => { void this.flushDraft(); }, 400);
   }
-  private draftKey(id: string): string { return `${this.api?.origin || ''}|${id}`; }
+  private draftKey(id: string): string { return `${this.activeServerId || this.api?.origin || ''}|${this.activeTargetId || 'local'}|${id}`; }
   private async flushDraft(): Promise<void> {
     clearTimeout(this.draftTimer);
     const id = this.selected;
     if (!id || !this.drafts) return;
+    const key = this.draftKey(id);
+    const text = this.draft;
+    const revision = this.authVersion;
     try {
-      await this.drafts.put(this.draftKey(id), this.draft);
+      await this.drafts.put(key, text);
       await this.drafts.flush();
-    } catch { this.notice = '草稿暂未保存到手机，请保持当前页面。'; }
+    } catch { if (revision === this.authVersion) this.notice = '草稿暂未保存到手机，请保持当前页面。'; }
   }
 
   setModel(value: string): void {
@@ -418,7 +677,7 @@ export class AppStore {
       if (revision !== this.authVersion) return;
       await this.flushDraft();
       if (revision !== this.authVersion) return;
-      if (this.selected) this.attachmentDrafts.set(this.selected, this.attachments);
+      if (this.selected) this.attachmentDrafts.set(this.draftKey(this.selected), this.attachments);
       this.selected = incoming.thread.id;
       this.snapshot = this.tracker.reconcile(undefined, incoming);
       this.draft = '';
@@ -439,6 +698,7 @@ export class AppStore {
     if (!this.draft.trim() && this.attachments.length === 0) return;
     const id = current.thread.id;
     const revision = this.authVersion;
+    const draftKey = this.draftKey(id);
     const active = current.thread.status === 'active';
     const params: SendCommand = {
       threadId: id, text: this.draft, imageIds: this.attachments.map((attachment: Attachment) => attachment.id),
@@ -450,11 +710,18 @@ export class AppStore {
     this.sending = true;
     this.error = '';
     let acknowledged = false;
+    this.commandNotices.set(draftKey, '上次发送的结果尚未确认，请先同步会话，避免重复发送。');
     try {
       await this.client.command('turn.send', JSON.stringify(params));
       acknowledged = true;
-      if (revision !== this.authVersion) return;
-      this.attachmentDrafts.delete(id);
+      this.commandNotices.delete(draftKey);
+      if (revision !== this.authVersion) {
+        const saved = await this.drafts?.get(draftKey, '');
+        if (saved === params.text) { await this.drafts?.delete(draftKey); await this.drafts?.flush(); }
+        this.attachmentDrafts.delete(draftKey);
+        return;
+      }
+      this.attachmentDrafts.delete(this.draftKey(id));
       if (this.selected === id) {
         if (this.draft === params.text) this.draft = '';
         this.attachments = this.attachments.filter((item: Attachment) => !params.imageIds.includes(item.id));
@@ -549,7 +816,7 @@ export class AppStore {
     finally { if (revision === this.authVersion) this.uploading = false; }
   }
   removeAttachment(id: string): void { this.attachments = this.attachments.filter((item: Attachment) => item.id !== id); }
-  imageUrl(path: string): string { return this.imageCache.get(path) || ''; }
+  imageUrl(path: string): string { return this.imageCache.get(this.draftKey(path)) || ''; }
   imageHeaders(): Record<string, string> { return {}; }
   private async cacheImages(): Promise<void> {
     const api = this.api;
@@ -558,18 +825,20 @@ export class AppStore {
     const revision = this.authVersion;
     for (const item of this.snapshot?.items || []) {
       for (const path of item.images || []) {
-        if (!safeImagePath(path) || this.imageCache.has(path) || this.imagePending.has(path)) continue;
-        this.imagePending.add(path);
+        const key = this.draftKey(path);
+        const pendingKey = `${revision}|${key}`;
+        if (!safeImagePath(path) || this.imageCache.has(key) || this.imagePending.has(pendingKey)) continue;
+        this.imagePending.add(pendingKey);
         try {
           const bytes = await api.image(path);
           if (revision !== this.authVersion) return;
-          const filePath = `${context.cacheDir}/codex-image-${path.split('/').pop()}`;
+          const filePath = `${context.cacheDir}/codex-image-${util.generateRandomUUID(true)}`;
           const file = fileIo.openSync(filePath, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
           try { fileIo.writeSync(file.fd, bytes); } finally { fileIo.closeSync(file); }
-          this.imageCache.set(path, `file://${filePath}`);
+          this.imageCache.set(key, `file://${filePath}`);
           this.imageVersion++;
         } catch { /* The message remains readable if an image cannot be retrieved. */ }
-        finally { this.imagePending.delete(path); }
+        finally { this.imagePending.delete(pendingKey); }
       }
     }
   }
@@ -603,18 +872,41 @@ export class AppStore {
     this.client?.close();
     this.live = false;
     let warning = '';
+    const revision = this.authVersion;
     try { await this.api?.logout(); }
     catch { warning = '已清除本机登录。网关暂不可达，请在电脑上核对客户端是否已撤销。'; }
+    if (revision !== this.authVersion) return;
     try { await this.forget(); this.notice = warning || '已退出登录。'; }
     catch (caught) { this.error = (caught as Error).message; }
     finally { this.busy = false; }
   }
   private async expired(): Promise<void> {
-    try { await this.forget(); this.error = '客户端登录已失效，请重新配对。'; }
-    catch (caught) { this.error = (caught as Error).message; }
+    const expected = this.authVersion + 1;
+    try { await this.forget(); if (this.authVersion === expected) this.error = '客户端登录已失效，请重新配对。'; }
+    catch (caught) { if (this.authVersion === expected) this.error = (caught as Error).message; }
   }
   private async forget(): Promise<void> {
+    this.switchVersion++;
     const origin = this.api?.origin;
+    const cookie = this.api?.cookie;
+    await this.leaveContext();
+    const revision = this.authVersion;
+    if (origin) {
+      await this.vault.clear(origin, cookie);
+      this.servers = this.servers.map((entry: ServerEntry) => {
+        if (entry.profile.origin !== origin || entry.profile.cookie !== cookie) return entry;
+        const profile = entry.profile;
+        entry.profile = new ServerProfile(profile.id, profile.origin, '', profile.deviceName, profile.name, profile.lastTargetId, profile.updatedAt);
+        entry.error = '需要配对';
+        return entry;
+      });
+    }
+    if (revision === this.authVersion) this.screen = 'servers';
+  }
+
+  private async leaveContext(): Promise<void> {
+    const draftSaved = this.flushDraft();
+    if (this.selected) this.attachmentDrafts.set(this.draftKey(this.selected), this.attachments);
     this.authVersion++;
     this.listVersion++;
     this.selectionVersion++;
@@ -632,11 +924,18 @@ export class AppStore {
     this.nextThreads = '';
     this.draft = '';
     this.attachments = [];
-    this.attachmentDrafts.clear();
+
     this.mode = 'workspaces';
     this.workspace = null;
     this.search = '';
-    this.screen = 'threads';
+    this.screen = 'servers';
+    this.activeServerId = '';
+    this.activeTargetId = '';
+    this.models = [];
+    this.settings = {};
+    this.newSettings = {};
+    this.error = '';
+    this.notice = '';
     this.listBusy = false;
     this.loading = false;
     this.busy = false;
@@ -656,7 +955,7 @@ export class AppStore {
     this.imageCache.clear();
     this.imagePending.clear();
     this.imageVersion++;
-    if (origin) await this.vault.clear(origin);
+    await draftSaved;
   }
   private async fail(error: Error): Promise<void> {
     if (error instanceof GatewayError && error.status === 401 && this.api?.cookie) { await this.expired(); return; }

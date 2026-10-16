@@ -3,7 +3,7 @@ import { util } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import {
   Bootstrap, ClientType, Device, DevicePage, ErrorReply, ModelPage, PairReply,
-  ThreadPage, ThreadSnapshot, UploadResult, WorkspacePage
+  ThreadPage, ThreadSnapshot, UploadResult, WorkspacePage, TargetPage
 } from '../model/Protocol';
 import { extractSessionCookie, isSessionCookie, normalizeOrigin, safeImagePath } from './Endpoint';
 
@@ -38,11 +38,16 @@ export class GatewayError extends Error {
 export class GatewayApi {
   readonly origin: string;
   cookie: string;
+  readonly targetId: string;
+  readonly legacy: boolean;
+  get targetPrefix(): string { return this.legacy ? '/api/v1' : `/api/v1/targets/${encodeURIComponent(this.targetId)}`; }
 
-  constructor(serverUrl: string, cookie: string = '') {
+  constructor(serverUrl: string, cookie: string = '', targetId: string = 'local', legacy: boolean = true) {
     this.origin = normalizeOrigin(serverUrl);
     if (cookie && !isSessionCookie(cookie)) throw new GatewayError('登录凭据格式无效，请重新配对。', 401);
     this.cookie = cookie;
+    this.targetId = targetId;
+    this.legacy = legacy;
   }
 
   async pair(token: string, name: string, clientKey: string): Promise<Device> {
@@ -58,8 +63,12 @@ export class GatewayApi {
     return result.device;
   }
 
-  async bootstrap(): Promise<Bootstrap> {
-    return this.parse(await this.json('/bootstrap')) as Bootstrap;
+  async bootstrap(timeoutMs: number = 60000): Promise<Bootstrap> {
+    return this.parse(await this.targetJson('/bootstrap', timeoutMs)) as Bootstrap;
+  }
+
+  async targets(): Promise<TargetPage> {
+    return this.parse(this.responseText(await this.request('/api/v1/targets', http.RequestMethod.GET, undefined, 'application/json', false, 5000))) as TargetPage;
   }
 
   async identify(clientKey: string): Promise<Device> {
@@ -75,20 +84,20 @@ export class GatewayApi {
     let path = `/threads?search=${encodeURIComponent(search)}`;
     if (cwd !== undefined) path += `&cwd=${encodeURIComponent(cwd)}`;
     if (cursor) path += `&cursor=${encodeURIComponent(cursor)}`;
-    return this.parse(await this.json(path)) as ThreadPage;
+    return this.parse(await this.targetJson(path)) as ThreadPage;
   }
 
   async workspaces(): Promise<WorkspacePage> {
-    return this.parse(await this.json('/workspaces')) as WorkspacePage;
+    return this.parse(await this.targetJson('/workspaces')) as WorkspacePage;
   }
 
   async snapshot(id: string, cursor?: string): Promise<ThreadSnapshot> {
     const path = `/threads/${encodeURIComponent(id)}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`;
-    return this.parse(await this.json(path)) as ThreadSnapshot;
+    return this.parse(await this.targetJson(path)) as ThreadSnapshot;
   }
 
   async models(): Promise<ModelPage> {
-    return this.parse(await this.json('/models')) as ModelPage;
+    return this.parse(await this.targetJson('/models')) as ModelPage;
   }
 
   async devices(): Promise<DevicePage> {
@@ -107,23 +116,27 @@ export class GatewayApi {
   async upload(bytes: ArrayBuffer, mime: string): Promise<UploadResult> {
     if (mime !== 'image/png' && mime !== 'image/jpeg' && mime !== 'image/webp') throw new GatewayError('请选择 PNG、JPEG 或 WebP 图片。', 400);
     if (bytes.byteLength === 0 || bytes.byteLength > 10 * 1024 * 1024) throw new GatewayError('单张图片不能超过 10 MiB。', 413);
-    const response = await this.request('/api/v1/uploads', http.RequestMethod.POST, bytes, mime);
+    const response = await this.request(`${this.targetPrefix}/uploads`, http.RequestMethod.POST, bytes, mime);
     return this.parse(this.responseText(response)) as UploadResult;
   }
 
   async image(path: string): Promise<ArrayBuffer> {
-    if (!safeImagePath(path)) throw new GatewayError('图片地址不属于当前网关。', 400);
+    if (!safeImagePath(path) || !path.startsWith(`${this.targetPrefix}/uploads/`)) throw new GatewayError('图片地址不属于当前网关。', 400);
     const response = await this.request(path, http.RequestMethod.GET, undefined, '', true);
     if (!(response.result instanceof ArrayBuffer)) throw new GatewayError('图片响应格式无效。', 502);
     if (response.result.byteLength > 10 * 1024 * 1024) throw new GatewayError('图片超过大小限制。', 413);
     return response.result;
   }
 
+  private async targetJson(path: string, timeoutMs: number = 60000): Promise<string> {
+    return this.responseText(await this.request(`${this.targetPrefix}${path}`, http.RequestMethod.GET, undefined, 'application/json', false, timeoutMs));
+  }
+
   private async json(path: string, method: http.RequestMethod = http.RequestMethod.GET, body?: string): Promise<string> {
     return this.responseText(await this.request(`/api/v1${path}`, method, body));
   }
 
-  private async request(path: string, method: http.RequestMethod, body?: string | ArrayBuffer, contentType: string = 'application/json', binary: boolean = false): Promise<http.HttpResponse> {
+  private async request(path: string, method: http.RequestMethod, body?: string | ArrayBuffer, contentType: string = 'application/json', binary: boolean = false, timeoutMs: number = 60000): Promise<http.HttpResponse> {
     const task = http.createHttp();
     let redirectBlocked = false;
     // Gateways serve these endpoints directly. On older systems, cancel when
@@ -147,8 +160,8 @@ export class GatewayApi {
       extraData: body,
       expectDataType: binary ? http.HttpDataType.ARRAY_BUFFER : http.HttpDataType.STRING,
       usingCache: false,
-      connectTimeout: 15000,
-      readTimeout: 60000,
+      connectTimeout: Math.min(15000, timeoutMs),
+      readTimeout: timeoutMs,
       maxLimit: binary ? 10 * 1024 * 1024 : 5 * 1024 * 1024
     };
     if (deviceInfo.sdkApiVersion >= 23) options.maxRedirects = 0;

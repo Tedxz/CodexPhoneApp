@@ -113,6 +113,44 @@ button {
 .sidebar-head {
   padding: 0 8px;
 }
+.target-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 22px;
+  min-width: 0;
+  font-size: 12px;
+}
+.target-picker select {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+.target-picker small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  opacity: 0.8;
+}
+.sidebar .target-picker select {
+  border-color: #3d4a3f;
+  background: #293a2f;
+  color: #e1e9df;
+}
+.sidebar .target-picker + .new-thread {
+  margin-top: 18px;
+}
+.target-directory-error {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: #e8c49f;
+}
 .sidebar-head > .eyebrow {
   display: flex;
   justify-content: space-between;

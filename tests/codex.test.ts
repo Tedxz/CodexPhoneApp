@@ -194,6 +194,147 @@ const pending = (events: GatewayEvent[]) =>
     (e): e is Extract<GatewayEvent, { type: 'request.pending' }> => e.type === 'request.pending',
   );
 
+test('revocation while creating a thread waits on model discovery prevents thread/start', async (t) => {
+  let authorized = true;
+  let release!: () => void;
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'model/list') return false;
+      release = () =>
+        socket.reply(message, {
+          data: [{ model: 'gpt-test', supportedReasoningEfforts: [] }],
+          nextCursor: null,
+        });
+      reached();
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const result = assert.rejects(
+    f.adapter.createThread({ cwd: '/project', model: 'gpt-test' }, () => {
+      if (!authorized) throw new Error('authorization revoked');
+    }),
+    /authorization revoked/,
+  );
+  await waiting;
+  authorized = false;
+  release();
+  await result;
+  assert.equal(requests(f.socket, 'thread/start').length, 0);
+});
+
+test('revocation after thread/start does not apply a pending settings mutation', async (t) => {
+  let authorized = true;
+  let release!: () => void;
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/start') return false;
+      release = () =>
+        socket.reply(message, {
+          thread: baseThread(),
+          model: 'gpt-test',
+          reasoningEffort: 'medium',
+        });
+      reached();
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const result = assert.rejects(
+    f.adapter.createThread({ cwd: '/project', mode: 'plan' }, () => {
+      if (!authorized) throw new Error('authorization revoked');
+    }),
+    /authorization revoked/,
+  );
+  await waiting;
+  authorized = false;
+  release();
+  await result;
+  assert.equal(requests(f.socket, 'thread/start').length, 1);
+  assert.equal(requests(f.socket, 'thread/settings/update').length, 0);
+});
+
+test('revocation during metadata reads prevents both idle sends and active turn steering', async (t) => {
+  for (const active of [false, true]) {
+    let authorized = true;
+    let holdRead = false;
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const f = fixture(t, {
+      active,
+      handler(message, socket) {
+        if (!holdRead || message.method !== 'thread/read') return false;
+        release = () =>
+          socket.reply(message, {
+            thread: baseThread(active ? { status: { type: 'active', activeFlags: [] } } : {}),
+          });
+        reached();
+        return true;
+      },
+    });
+    await f.adapter.connect();
+    await f.adapter.subscribe('thread-1');
+    holdRead = true;
+    const result = assert.rejects(
+      f.adapter.send({ threadId: 'thread-1', text: 'must not run' }, () => {
+        if (!authorized) throw new Error('authorization revoked');
+      }),
+      /authorization revoked/,
+    );
+    await waiting;
+    authorized = false;
+    release();
+    await result;
+    assert.equal(requests(f.socket, 'turn/start').length, 0);
+    assert.equal(requests(f.socket, 'turn/steer').length, 0);
+  }
+});
+
+test('revocation while resolving send settings prevents the final turn/start', async (t) => {
+  let authorized = true;
+  let release!: () => void;
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'model/list') return false;
+      release = () =>
+        socket.reply(message, {
+          data: [{ model: 'gpt-test', supportedReasoningEfforts: [] }],
+          nextCursor: null,
+        });
+      reached();
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  await f.adapter.subscribe('thread-1');
+  const result = assert.rejects(
+    f.adapter.send({ threadId: 'thread-1', text: 'must not run', model: 'gpt-test' }, () => {
+      if (!authorized) throw new Error('authorization revoked');
+    }),
+    /authorization revoked/,
+  );
+  await waiting;
+  authorized = false;
+  release();
+  await result;
+  assert.equal(requests(f.socket, 'turn/start').length, 0);
+});
+
 test('connects only to existing Unix socket, negotiates experimental protocol, lists all main session sources', async (t) => {
   const f = fixture(t);
   await f.adapter.connect();
