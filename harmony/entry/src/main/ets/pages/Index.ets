@@ -1,5 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { WorkspaceSection, workspaceBottomRoot, workspacePathLabel, workspaceSections } from '../model/Workspaces';
 import { AppStore, ServerEntry } from '../state/AppStore';
 import { Attachment, ConversationItem, Device, PendingRequest, Project, QuestionAnswer, ThreadSummary,
   WorkspaceSummary } from '../model/Protocol';
@@ -57,11 +59,62 @@ struct Index {
     return this.store.mode === 'workspaces' && this.store.workspace === null;
   }
 
+  private workspaceGroups(): WorkspaceSection[] {
+    return workspaceSections(this.store.workspaces, this.store.workspacePins, this.store.search,
+      this.store.workspaceBottom, this.store.workspaceBottomTrees);
+  }
+
   private visibleWorkspaces(): WorkspaceSummary[] {
-    const query = this.store.search.trim().toLocaleLowerCase();
-    return this.store.workspaces.filter((workspace: WorkspaceSummary) => !query ||
-      workspace.cwd.toLocaleLowerCase().includes(query) ||
-      workspaceName(workspace.cwd).toLocaleLowerCase().includes(query));
+    let items: WorkspaceSummary[] = [];
+    for (const section of this.workspaceGroups()) items = items.concat(section.items);
+    return items;
+  }
+
+  private workspaceLabel(cwd: string): string {
+    return workspacePathLabel(cwd, this.store.workspaces.map((item: WorkspaceSummary) => item.cwd));
+  }
+
+  private workspaceItems(id: string): WorkspaceSummary[] {
+    return this.workspaceGroups().find((section: WorkspaceSection) => section.id === id)?.items || [];
+  }
+
+  private showWorkspaceDetails(cwd: string): void {
+    const bottomRoot = workspaceBottomRoot(cwd, this.store.workspaceBottomTrees);
+    const ownTree = this.store.workspaceBottomTrees.includes(cwd);
+    let message = cwd || '未记录工作路径';
+    if (bottomRoot !== undefined) {
+      message += ownTree ? '\n\n此路径及子路径已置底' : `\n\n随上级路径置底：${bottomRoot}`;
+      if (this.store.workspacePins.includes(cwd)) message += '\n此路径已单独置顶';
+    }
+    const buttons: AlertDialogButtonOptions[] = [
+      { value: this.store.workspacePins.includes(cwd) ? '取消置顶' : '置顶路径',
+        action: () => this.store.toggleWorkspacePin(cwd) },
+      { value: this.store.workspaceBottom.includes(cwd) ? '取消置底' : '置底路径',
+        enabled: bottomRoot === undefined,
+        action: () => this.store.toggleWorkspaceBottom(cwd) },
+      { value: ownTree ? '取消路径及子路径置底' : '置底路径及子路径', enabled: !!cwd,
+        action: () => this.store.toggleWorkspaceBottomTree(cwd) }
+    ];
+    if (bottomRoot !== undefined && !ownTree) {
+      buttons.push({ value: '取消上级路径及子路径置底',
+        action: () => this.store.toggleWorkspaceBottomTree(bottomRoot) });
+    }
+    buttons.push({ value: '复制路径', enabled: !!cwd, action: () => { void this.copyWorkspacePath(cwd); } });
+    buttons.push({ value: '关闭', action: () => {} });
+    this.getUIContext().showAlertDialog({
+      title: '完整工作路径',
+      message,
+      buttons
+    });
+  }
+
+  private async copyWorkspacePath(cwd: string): Promise<void> {
+    try {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, cwd));
+      this.getUIContext().getPromptAction().showToast({ message: '已复制完整路径' });
+    } catch {
+      this.store.notice = '复制失败，请重试';
+    }
   }
 
   private openNew(): void {
@@ -328,77 +381,122 @@ struct Index {
 
   @Builder
   workspaceRow(workspace: WorkspaceSummary) {
-    Column({ space: 9 }) {
-      Row({ space: 10 }) {
-        Text('▱').fontSize(26).fontColor(GREEN)
-        Text(workspaceName(workspace.cwd))
-          .fontSize(17)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(INK)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        Text('↗').fontSize(20).fontColor(MUTED)
+    Row({ space: 0 }) {
+      Column({ space: 6 }) {
+        Row({ space: 8 }) {
+          Text('›').fontSize(18).fontColor(MUTED).width(16).height(20).textAlign(TextAlign.Center)
+            .rotate({ angle: this.store.expandedWorkspaces.includes(workspace.cwd) ? 90 : 0 })
+          Text(workspaceName(workspace.cwd))
+            .fontSize(16).fontWeight(FontWeight.Medium).fontColor(INK)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          if (workspace.activeCount > 0) {
+            Text(`● ${workspace.activeCount} 进行中`).fontSize(11).fontColor(GREEN)
+          }
+        }.width('100%')
+        Row({ space: 8 }) {
+          Text(this.workspaceLabel(workspace.cwd))
+            .fontSize(12).fontColor(MUTED).maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          Text(`${workspace.threadCount} 个会话`).fontSize(11).fontColor(MUTED)
+        }.width('100%')
       }
-      Text(workspace.cwd || '没有记录工作路径')
-        .fontSize(12)
-        .fontColor(MUTED)
-        .maxLines(2)
-        .wordBreak(WordBreak.BREAK_ALL)
-        .width('100%')
-      Row({ space: 12 }) {
-        Text(`${workspace.threadCount} 个会话`).fontSize(12).fontColor(MUTED)
-        if (workspace.activeCount > 0) {
-          Text(`● ${workspace.activeCount} 个进行中`).fontSize(12).fontColor(GREEN)
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 4, right: 0, top: 10, bottom: 10 })
+      .layoutWeight(1)
+      .onClick(() => this.store.toggleWorkspaceExpanded(workspace.cwd))
+      .accessibilityText(`${workspaceName(workspace.cwd)}，${workspace.threadCount} 个会话，${this.store.expandedWorkspaces.includes(workspace.cwd) ? '已展开，点击折叠' : '已折叠，点击展开'}`)
+      Button({ type: ButtonType.Normal }) {
+        Image($r('app.media.workspace_options')).width(18).height(18).objectFit(ImageFit.Contain)
+      }
+        .width(40).height(40).padding(0)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(`${workspaceName(workspace.cwd)}：路径排序与完整路径`)
+        .onClick(() => this.showWorkspaceDetails(workspace.cwd))
+    }
+    .width('100%').backgroundColor(Color.Transparent).alignItems(VerticalAlign.Top)
+  }
+
+  @Builder
+  workspaceSection(id: string) {
+    if (this.workspaceItems(id).length > 0) {
+      if (id !== 'recent' || this.workspaceItems('pinned').length > 0) {
+        ListItem() {
+          Row() {
+            Text(this.workspaceGroups().find((section: WorkspaceSection) => section.id === id)?.title || '')
+              .fontSize(12).fontColor(MUTED)
+            Blank()
+            Text(`${this.workspaceItems(id).length}`).fontSize(12).fontColor(MUTED)
+          }.width('100%').padding({ left: 4, right: 4, top: 8, bottom: 4 })
         }
       }
+      ForEach(this.workspaceItems(id), (workspace: WorkspaceSummary) => {
+        ListItem() {
+          Column({ space: 8 }) {
+            this.workspaceRow(workspace)
+            if (this.store.expandedWorkspaces.includes(workspace.cwd)) {
+              Column({ space: 6 }) {
+                ForEach(this.store.workspacePage(workspace.cwd).threads, (thread: ThreadSummary) => {
+                  this.threadRow(thread)
+                }, (thread: ThreadSummary) => JSON.stringify(thread))
+                if (this.store.workspacePage(workspace.cwd).busy) {
+                  Text('正在加载会话…').fontSize(12).fontColor(MUTED)
+                }
+                if (this.store.workspacePage(workspace.cwd).error) {
+                  Text(this.store.workspacePage(workspace.cwd).error).fontSize(12).fontColor(MUTED)
+                  Button('重试').fontSize(12).fontColor(GREEN).backgroundColor(PALE_GREEN)
+                    .onClick(() => this.store.loadWorkspaceThreads(workspace.cwd, !!this.store.workspacePage(workspace.cwd).cursor))
+                } else if (this.store.workspacePage(workspace.cwd).cursor) {
+                  Button({ type: ButtonType.Normal }) {
+                    Row({ space: 6 }) {
+                      Text('加载更多会话').fontSize(12).fontColor(GREEN)
+                      Text('›').fontSize(16).fontColor(GREEN).width(12).height(16).textAlign(TextAlign.Center).rotate({ angle: 90 })
+                    }
+                  }.width('100%').height(28).padding(0).backgroundColor(Color.Transparent)
+                    .enabled(!this.store.workspacePage(workspace.cwd).busy)
+                    .onClick(() => this.store.loadWorkspaceThreads(workspace.cwd, true))
+                } else if (!this.store.workspacePage(workspace.cwd).busy && this.store.workspacePage(workspace.cwd).threads.length === 0) {
+                  Text('此工作路径下还没有会话。').fontSize(12).fontColor(MUTED)
+                }
+              }.width('100%').padding({ bottom: 6 })
+            }
+          }.width('100%')
+        }
+      }, (workspace: WorkspaceSummary) => JSON.stringify(workspace) + JSON.stringify(this.store.workspacePage(workspace.cwd)) + `${this.store.expandedWorkspaces.includes(workspace.cwd)}`)
     }
-    .alignItems(HorizontalAlign.Start)
-    .padding(18)
-    .width('100%')
-    .backgroundColor(CARD_BACKGROUND)
-    .borderRadius(18)
-    .onClick(() => this.store.selectWorkspace(workspace.cwd))
-    .accessibilityText(`${workspaceName(workspace.cwd)}，${workspace.threadCount} 个会话`)
   }
 
   @Builder
   threadRow(thread: ThreadSummary) {
-    Column({ space: 10 }) {
+    Column({ space: 4 }) {
       Row({ space: 8 }) {
         if (thread.status === 'active') {
           Text('●').fontSize(9).fontColor(GREEN)
         }
         Text(thread.title || '新会话')
-          .fontSize(16)
+          .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor(INK)
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-      }
-      Text(thread.preview || workspaceName(thread.cwd))
-        .fontSize(13)
-        .lineHeight(20)
-        .fontColor(MUTED)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
-      Row({ space: 12 }) {
-        Text(workspaceName(thread.cwd))
-          .fontSize(11)
-          .fontColor(GREEN)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .layoutWeight(1)
-        Text(shortTime(thread.updatedAt)).fontSize(11).fontColor(MUTED)
+        Text(shortTime(thread.updatedAt)).fontSize(10).fontColor(MUTED).maxLines(1)
+      }.width('100%')
+      if (thread.preview) {
+        Text(thread.preview)
+          .fontSize(12)
+          .lineHeight(18)
+          .fontColor(MUTED)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .padding(18)
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+    .constraintSize({ minHeight: 48 })
     .width('100%')
     .backgroundColor(CARD_BACKGROUND)
-    .borderRadius(18)
+    .borderRadius(12)
     .onClick(() => this.store.chooseThread(thread.id))
   }
 
@@ -469,7 +567,7 @@ struct Index {
         .backgroundColor(CARD_BACKGROUND)
         .onChange((value: string) => this.store.setSearch(value))
       Row() {
-        Text(this.overview() ? '按工作路径分组' : '你的会话').fontSize(12).fontColor(MUTED)
+        Text(this.overview() ? '工作路径' : '你的会话').fontSize(12).fontColor(MUTED)
         Blank()
         Text(`${this.overview() ? this.visibleWorkspaces().length : this.store.threads.length}`)
           .fontSize(12).fontColor(MUTED)
@@ -478,11 +576,15 @@ struct Index {
     }
     .padding({ left: 20, right: 20, top: 20, bottom: 12 })
     .width('100%')
-    List({ space: 12 }) {
+    List({ space: this.overview() ? 6 : 12 }) {
       if (this.overview()) {
-        ForEach(this.visibleWorkspaces(), (workspace: WorkspaceSummary) => {
-          ListItem() { this.workspaceRow(workspace) }
-        }, (workspace: WorkspaceSummary) => JSON.stringify(workspace))
+        if (this.store.search.trim()) {
+          this.workspaceSection('search')
+        } else {
+          this.workspaceSection('pinned')
+          this.workspaceSection('recent')
+          this.workspaceSection('bottom')
+        }
       } else {
         ForEach(this.store.threads, (thread: ThreadSummary) => {
           ListItem() { this.threadRow(thread) }
@@ -503,8 +605,12 @@ struct Index {
       }
       if (!this.overview() && this.store.nextThreads) {
         ListItem() {
-          Button('加载更多会话')
-            .width('100%').height(48).fontSize(14).fontColor(GREEN).backgroundColor(PALE_GREEN)
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 6 }) {
+              Text('加载更多会话').fontSize(12).fontColor(GREEN)
+              Text('›').fontSize(16).fontColor(GREEN).width(12).height(16).textAlign(TextAlign.Center).rotate({ angle: 90 })
+            }
+          }.width('100%').height(28).padding(0).backgroundColor(Color.Transparent)
             .enabled(!this.store.listBusy).onClick(() => this.store.loadMore())
         }
       }

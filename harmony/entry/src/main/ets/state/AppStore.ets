@@ -6,6 +6,7 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { image } from '@kit.ImageKit';
 import { Attachment, Bootstrap, Device, EventEnvelope, ModelOption, Project, QuestionAnswer, SessionSettings, ThreadSnapshot, ThreadSummary, WorkspaceSummary, TargetSummary, ConnectionState, Capabilities } from '../model/Protocol';
 import { applyEvent, SnapshotTracker } from '../model/State';
+import { isWorkspaceWithin, parseWorkspacePins, workspacePinsKey, workspaceBottomKey, workspaceBottomTreesKey } from '../model/Workspaces';
 import { GatewayApi, GatewayError } from '../transport/GatewayApi';
 import { NativeLiveClient, LiveHandlers } from '../transport/NativeLiveClient';
 import { ServerProfile, SessionVault } from '../transport/SessionVault';
@@ -66,6 +67,15 @@ export class ServerEntry {
   }
 }
 
+export class WorkspaceThreads {
+  cwd: string;
+  threads: ThreadSummary[] = [];
+  cursor: string = '';
+  busy: boolean = false;
+  error: string = '';
+  constructor(cwd: string) { this.cwd = cwd; }
+}
+
 @Observed
 export class AppStore {
   servers: ServerEntry[] = [];
@@ -93,6 +103,11 @@ export class AppStore {
   search: string = '';
   threads: ThreadSummary[] = [];
   workspaces: WorkspaceSummary[] = [];
+  workspacePins: string[] = [];
+  workspaceBottom: string[] = [];
+  workspaceBottomTrees: string[] = [];
+  expandedWorkspaces: string[] = [];
+  workspacePages: WorkspaceThreads[] = [];
   nextThreads: string = '';
   snapshot: ThreadSnapshot | undefined = undefined;
   draft: string = '';
@@ -114,6 +129,8 @@ export class AppStore {
 
   private context: common.UIAbilityContext | undefined = undefined;
   private drafts: preferences.Preferences | undefined = undefined;
+  private browserPreferences: preferences.Preferences | undefined = undefined;
+  private pinWriteTask: Promise<void> = Promise.resolve();
   private vault: SessionVault = new SessionVault();
   private api: GatewayApi | undefined = undefined;
   private identifiedApi: GatewayApi | undefined = undefined;
@@ -155,6 +172,8 @@ export class AppStore {
     context.eventHub.on('codex:background', this.background);
     try {
       this.drafts = await preferences.getPreferences(context, 'codex_phone_drafts');
+      try { this.browserPreferences = await preferences.getPreferences(context, 'codex_phone_browser'); }
+      catch { this.notice = '无法读取路径排序设置，会话仍可正常使用。'; }
       this.servers = (await this.vault.list()).map((profile: ServerProfile) => new ServerEntry(profile));
       this.screen = this.servers.length > 0 ? 'servers' : 'pair';
       this.checked = true;
@@ -355,6 +374,19 @@ export class AppStore {
     const api = new GatewayApi(entry.profile.origin, entry.profile.cookie, targetId, entry.legacy);
     const revision = this.authVersion;
     try {
+      let rawPins: preferences.ValueType = '[]';
+      let rawBottom: preferences.ValueType = '[]';
+      let rawBottomTrees: preferences.ValueType = '[]';
+      try {
+        await this.pinWriteTask;
+        rawPins = await this.browserPreferences?.get(workspacePinsKey(serverId, targetId), '[]') || '[]';
+        rawBottom = await this.browserPreferences?.get(workspaceBottomKey(serverId, targetId), '[]') || '[]';
+        rawBottomTrees = await this.browserPreferences?.get(workspaceBottomTreesKey(serverId, targetId), '[]') || '[]';
+      } catch { this.notice = '无法读取路径排序设置，会话仍可正常使用。'; }
+      if (switching !== this.switchVersion) return;
+      this.workspacePins = parseWorkspacePins(typeof rawPins === 'string' ? rawPins : '[]');
+      this.workspaceBottom = parseWorkspacePins(typeof rawBottom === 'string' ? rawBottom : '[]');
+      this.workspaceBottomTrees = parseWorkspacePins(typeof rawBottomTrees === 'string' ? rawBottomTrees : '[]');
       await this.activate(api);
       if (this.api === api && switching === this.switchVersion) {
         const profile = entry.profile;
@@ -514,6 +546,84 @@ export class AppStore {
     this.search = '';
     this.invalidateList();
   }
+  toggleWorkspacePin(cwd: string): void {
+    this.workspacePins = this.workspacePins.includes(cwd)
+      ? this.workspacePins.filter((path: string) => path !== cwd) : this.workspacePins.concat([cwd]);
+    this.workspaceBottom = this.workspaceBottom.filter((path: string) => path !== cwd);
+    this.saveWorkspaceOrder();
+  }
+  toggleWorkspaceBottom(cwd: string): void {
+    this.workspaceBottom = this.workspaceBottom.includes(cwd)
+      ? this.workspaceBottom.filter((path: string) => path !== cwd) : this.workspaceBottom.concat([cwd]);
+    this.workspacePins = this.workspacePins.filter((path: string) => path !== cwd);
+    this.saveWorkspaceOrder();
+  }
+  toggleWorkspaceBottomTree(cwd: string): void {
+    if (!cwd) return;
+    if (this.workspaceBottomTrees.includes(cwd)) {
+      this.workspaceBottomTrees = this.workspaceBottomTrees.filter((path: string) => path !== cwd);
+    } else {
+      this.workspaceBottomTrees = this.workspaceBottomTrees.concat([cwd]);
+      this.workspacePins = this.workspacePins.filter((path: string) => !isWorkspaceWithin(path, cwd));
+    }
+    this.saveWorkspaceOrder();
+  }
+  private saveWorkspaceOrder(): void {
+    const key = workspacePinsKey(this.activeServerId, this.activeTargetId);
+    const bottomKey = workspaceBottomKey(this.activeServerId, this.activeTargetId);
+    const bottomValue = JSON.stringify(this.workspaceBottom);
+    const bottomTreesKey = workspaceBottomTreesKey(this.activeServerId, this.activeTargetId);
+    const bottomTreesValue = JSON.stringify(this.workspaceBottomTrees);
+    const value = JSON.stringify(this.workspacePins);
+    const revision = this.authVersion;
+    this.pinWriteTask = this.pinWriteTask.then(async () => {
+      if (!this.browserPreferences) throw new Error('本地存储尚未准备好');
+      await this.browserPreferences.put(key, value);
+      await this.browserPreferences.put(bottomKey, bottomValue);
+      await this.browserPreferences.put(bottomTreesKey, bottomTreesValue);
+      await this.browserPreferences.flush();
+    }).catch(() => {
+      if (revision === this.authVersion) this.notice = '排序已在本次浏览中生效，但未能保存到设备。';
+    });
+  }
+  workspacePage(cwd: string): WorkspaceThreads {
+    return this.workspacePages.find((page: WorkspaceThreads) => page.cwd === cwd) || new WorkspaceThreads(cwd);
+  }
+  toggleWorkspaceExpanded(cwd: string): void {
+    if (this.expandedWorkspaces.includes(cwd)) {
+      this.expandedWorkspaces = this.expandedWorkspaces.filter((path: string) => path !== cwd);
+      this.workspacePages = this.workspacePages.filter((page: WorkspaceThreads) => page.cwd !== cwd);
+    } else {
+      this.expandedWorkspaces = this.expandedWorkspaces.concat([cwd]);
+      void this.loadWorkspaceThreads(cwd);
+    }
+  }
+  async loadWorkspaceThreads(cwd: string, more: boolean = false): Promise<void> {
+    const api = this.api;
+    if (!api || !this.expandedWorkspaces.includes(cwd)) return;
+    const previous = this.workspacePage(cwd);
+    if (more && (previous.busy || !previous.cursor)) return;
+    const page = new WorkspaceThreads(cwd);
+    page.threads = previous.threads;
+    page.cursor = more ? previous.cursor : '';
+    page.busy = true;
+    this.workspacePages = this.workspacePages.filter((item: WorkspaceThreads) => item.cwd !== cwd).concat([page]);
+    const revision = this.authVersion;
+    try {
+      const result = await api.threads('', cwd, more ? previous.cursor : undefined);
+      if (revision !== this.authVersion || this.workspacePage(cwd) !== page) return;
+      page.threads = more ? previous.threads.concat(result.data.filter((item: ThreadSummary) => !previous.threads.some((old: ThreadSummary) => old.id === item.id))) : result.data;
+      page.cursor = result.nextCursor || '';
+    } catch (caught) {
+      if (revision !== this.authVersion || this.workspacePage(cwd) !== page) return;
+      page.error = (caught as Error).message || '加载会话失败，请重试';
+    } finally {
+      if (revision === this.authVersion && this.workspacePage(cwd) === page) {
+        page.busy = false;
+        this.workspacePages = this.workspacePages.slice();
+      }
+    }
+  }
   selectWorkspace(cwd: string | null): void {
     this.mode = 'workspaces';
     this.workspace = cwd;
@@ -546,7 +656,10 @@ export class AppStore {
     try {
       if (this.mode === 'workspaces' && this.workspace === null) {
         const result = await api.workspaces();
-        if (version === this.listVersion) this.workspaces = result.data;
+        if (version === this.listVersion) {
+          this.workspaces = result.data;
+          for (const cwd of this.expandedWorkspaces) void this.loadWorkspaceThreads(cwd);
+        }
       } else {
         const cwd = this.mode === 'workspaces' && this.workspace !== null ? this.workspace : undefined;
         const result = await api.threads(this.search.trim().slice(0, 200), cwd, cursor);
@@ -920,6 +1033,11 @@ export class AppStore {
     this.snapshot = undefined;
     this.threads = [];
     this.workspaces = [];
+    this.workspacePins = [];
+    this.workspaceBottom = [];
+    this.workspaceBottomTrees = [];
+    this.expandedWorkspaces = [];
+    this.workspacePages = [];
     this.devices = [];
     this.nextThreads = '';
     this.draft = '';

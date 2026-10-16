@@ -203,6 +203,14 @@ function TargetWorkspace({
     <T,>(path: string, options?: RequestInit) => targetScope.fetch<T>(path, options),
     [targetScope],
   );
+  const loadWorkspaceThreads = useCallback(
+    (cwd: string, cursor?: string) => {
+      const params = new URLSearchParams({ cwd });
+      if (cursor) params.set('cursor', cursor);
+      return targetApi<{ data: ThreadSummary[]; nextCursor: string | null }>(`/threads?${params}`);
+    },
+    [targetApi],
+  );
   const targetName = targets.find((target) => target.id === targetId)?.name || '本机';
   const authRevision = useRef(0);
   const refreshTask = useRef<Promise<void> | null>(null);
@@ -940,6 +948,8 @@ function TargetWorkspace({
           </button>
         </div>
         <ThreadBrowser
+          targetId={targetId}
+          loadWorkspaceThreads={loadWorkspaceThreads}
           mode={browserQuery.mode}
           workspace={browserQuery.workspace}
           workspaces={workspaces}

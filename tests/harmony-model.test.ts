@@ -816,6 +816,23 @@ interface NativeAppStore {
   notice: string;
   mode: string;
   workspace: string | null;
+  workspacePins: string[];
+  workspaceBottom: string[];
+  workspaceBottomTrees: string[];
+  expandedWorkspaces: string[];
+  toggleWorkspaceBottom(cwd: string): void;
+  toggleWorkspaceBottomTree(cwd: string): void;
+  toggleWorkspaceExpanded(cwd: string): void;
+  loadWorkspaceThreads(cwd: string, more?: boolean): Promise<void>;
+  workspacePage(cwd: string): {
+    threads: ThreadSummary[];
+    cursor: string;
+    busy: boolean;
+    error: string;
+  };
+  toggleWorkspacePin(cwd: string): void;
+  pinWriteTask: Promise<void>;
+  browserPreferences?: StorePreferences;
   search: string;
   searchTimer: number;
   draft: string;
@@ -1069,6 +1086,124 @@ function mockedStore() {
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test('Harmony workspace pins survive context switches and rapid writes stay scoped to their machine', async () => {
+  const { store, responses, context, preferences } = mockedStore();
+  responses.targets = async () => ({
+    data: ['local', 'remote'].map((id) => ({
+      id,
+      name: id,
+      kind: id === 'local' ? ('local' as const) : ('ssh' as const),
+      connection: connectedBootstrap().connection,
+      capabilities: connectedBootstrap().capabilities,
+    })),
+  });
+  try {
+    await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
+    store.toggleWorkspacePin('/work/a');
+    store.toggleWorkspacePin('/work/b');
+    store.toggleWorkspacePin('/work/a');
+    store.toggleWorkspaceBottom('/work/a');
+    store.expandedWorkspaces = ['/work/b'];
+    await store.chooseTarget('server-a', 'remote');
+    assert.deepEqual(store.workspacePins, []);
+    assert.deepEqual(store.expandedWorkspaces, []);
+    assert.deepEqual(store.workspaceBottom, []);
+    store.toggleWorkspacePin('/remote/project');
+    await store.chooseTarget('server-a', 'local');
+    assert.deepEqual(store.workspacePins, ['/work/b']);
+    assert.deepEqual(store.workspaceBottom, ['/work/a']);
+    store.toggleWorkspacePin('/work/a');
+    assert.deepEqual(store.workspaceBottom, []);
+    store.toggleWorkspaceBottom('/work/a');
+    assert.deepEqual(store.workspacePins, ['/work/b']);
+    assert.equal([...preferences.values()].includes('["/remote/project"]'), true);
+    await store.chooseTarget('server-a', 'remote');
+    assert.deepEqual(store.workspacePins, ['/remote/project']);
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony subtree placement persists, isolates machines and keeps later pin overrides', async () => {
+  const { store, responses, context, preferences } = mockedStore();
+  const restarted = mockedStore();
+  responses.targets = async () => ({
+    data: ['local', 'remote'].map((id) => ({
+      id,
+      name: id,
+      kind: id === 'local' ? ('local' as const) : ('ssh' as const),
+      connection: connectedBootstrap().connection,
+      capabilities: connectedBootstrap().capabilities,
+    })),
+  });
+  try {
+    await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
+    store.toggleWorkspacePin('/work/app');
+    store.toggleWorkspacePin('/work/app/child');
+    store.toggleWorkspacePin('/work/app-old');
+    store.toggleWorkspaceBottom('/work/app/manual');
+    store.toggleWorkspaceBottomTree('/work/app');
+    assert.deepEqual(store.workspacePins, ['/work/app-old']);
+    assert.deepEqual(store.workspaceBottomTrees, ['/work/app']);
+    assert.deepEqual(store.workspaceBottom, ['/work/app/manual']);
+    store.toggleWorkspaceBottomTree('');
+    assert.deepEqual(store.workspaceBottomTrees, ['/work/app']);
+    store.toggleWorkspacePin('/work/app/child');
+    await store.chooseTarget('server-a', 'remote');
+    assert.deepEqual(store.workspaceBottomTrees, []);
+    store.toggleWorkspaceBottomTree('/remote');
+    await store.chooseTarget('server-a', 'local');
+    assert.deepEqual(store.workspaceBottomTrees, ['/work/app']);
+    assert.deepEqual(store.workspacePins, ['/work/app-old', '/work/app/child']);
+    await store.pinWriteTask;
+    for (const [key, value] of preferences) restarted.preferences.set(key, value);
+    await restarted.store.initialize(restarted.context);
+    await restarted.store.chooseTarget('server-a', 'local');
+    assert.deepEqual(restarted.store.workspaceBottomTrees, ['/work/app']);
+    assert.deepEqual(restarted.store.workspacePins, ['/work/app-old', '/work/app/child']);
+    store.toggleWorkspaceBottomTree('/work/app/nested');
+    store.toggleWorkspaceBottomTree('/work/app');
+    assert.deepEqual(store.workspaceBottomTrees, ['/work/app/nested']);
+    assert.deepEqual(store.workspaceBottom, ['/work/app/manual']);
+    assert.deepEqual(store.workspacePins, ['/work/app-old', '/work/app/child']);
+    await store.chooseTarget('server-a', 'remote');
+    assert.deepEqual(store.workspaceBottomTrees, ['/remote']);
+  } finally {
+    store.dispose();
+    restarted.store.dispose();
+  }
+});
+
+test('Harmony continues opening sessions when pin storage cannot be read or written', async () => {
+  const { store, context } = mockedStore();
+  try {
+    await store.initialize(context);
+    store.browserPreferences = {
+      async get() {
+        throw new Error('disk unavailable');
+      },
+      async put() {
+        throw new Error('disk unavailable');
+      },
+      async flush() {},
+      async delete() {},
+    };
+    await store.chooseTarget('server-a', 'local');
+    assert.ok(store.boot);
+    assert.deepEqual(store.workspacePins, []);
+    store.toggleWorkspacePin('/work/a');
+    store.toggleWorkspaceBottomTree('/archive');
+    await store.pinWriteTask;
+    assert.deepEqual(store.workspacePins, ['/work/a']);
+    assert.deepEqual(store.workspaceBottomTrees, ['/archive']);
+    assert.match(store.notice, /未能保存/);
+  } finally {
+    store.dispose();
+  }
+});
 
 test('Harmony upgrades an authenticated legacy login in place and follows its merged client ID', async () => {
   const { store, responses, calls, context } = mockedStore();
@@ -1854,6 +1989,80 @@ test('Harmony polls update observed machine rows in place and preserve stable Se
     await store.saveServer();
     assert.equal(store.servers[0], server);
     assert.equal(server.profile.name, '重命名 Server');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony inline workspace sessions load lazily, paginate, retry and discard collapsed responses', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  const calls: Array<[string | undefined, string | undefined]> = [];
+  const first = { ...snapshot('first', 1).thread, id: 'first', cwd: '/a' };
+  const second = { ...first, id: 'second' };
+  responses.threads = async (_search, cwd, cursor) => {
+    calls.push([cwd, cursor]);
+    return cursor
+      ? { data: [first, second], nextCursor: null }
+      : { data: [first], nextCursor: 'page-2' };
+  };
+  try {
+    assert.deepEqual(store.expandedWorkspaces, []);
+    assert.deepEqual(calls, []);
+    store.toggleWorkspaceExpanded('/a');
+    await tick();
+    assert.deepEqual(calls, [['/a', undefined]]);
+    assert.equal(store.workspacePage('/a').threads.length, 1);
+    await store.loadWorkspaceThreads('/a', true);
+    assert.equal(store.workspacePage('/a').threads.length, 2);
+    assert.equal(store.workspacePage('/a').cursor, '');
+    store.toggleWorkspaceExpanded('/b');
+    await tick();
+    assert.deepEqual(store.expandedWorkspaces, ['/a', '/b']);
+    store.toggleWorkspaceExpanded('/a');
+    assert.equal(store.workspacePage('/a').threads.length, 0);
+    responses.threads = async () => {
+      throw new Error('temporary failure');
+    };
+    store.toggleWorkspaceExpanded('/a');
+    await tick();
+    assert.equal(store.workspacePage('/a').error, 'temporary failure');
+    let resolve!: (page: ThreadPageResult) => void;
+    responses.threads = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    const pending = store.loadWorkspaceThreads('/a');
+    store.toggleWorkspaceExpanded('/a');
+    resolve({ data: [second], nextCursor: null });
+    await pending;
+    assert.equal(store.workspacePage('/a').threads.length, 0);
+    responses.threads = async () => ({ data: [first], nextCursor: null });
+    store.toggleWorkspaceExpanded('/a');
+    await tick();
+    assert.equal(store.workspacePage('/a').threads[0].id, 'first');
+    assert.equal(store.workspacePage('/a').error, '');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony late inline workspace replies cannot enter another machine', async () => {
+  const { store, responses, context } = mockedStore();
+  try {
+    await store.initialize(context);
+    await store.chooseTarget('server-a', 'local');
+    let resolve!: (page: ThreadPageResult) => void;
+    responses.threads = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    store.toggleWorkspaceExpanded('/a');
+    await store.showServers();
+    resolve({ data: [snapshot('old target', 1).thread], nextCursor: null });
+    await tick();
+    assert.deepEqual(store.expandedWorkspaces, []);
+    assert.deepEqual(store.workspacePage('/a').threads, []);
   } finally {
     store.dispose();
   }
