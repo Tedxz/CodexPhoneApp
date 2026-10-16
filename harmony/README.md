@@ -2,6 +2,8 @@
 
 面向 HarmonyOS 7 的 ArkTS / ArkUI 原生手机应用，通过已有网关的 HTTP 和 WebSocket 接口访问电脑上的 Codex 会话。界面、图片选择和凭据存储使用鸿蒙原生能力。
 
+应用图标沿用 Codex 的花形与终端标记，并适配本 App 的绿色系；图标来源、资源位置和真机验证见[图标说明](../docs/ICON-ASSETS.md)。
+
 ## 功能
 
 - 保存多个 Server，分别命名、配对与管理；首页按 Server 分组展示本机和 SSH 远程机器。

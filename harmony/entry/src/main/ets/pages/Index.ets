@@ -99,15 +99,11 @@ struct Index {
   @Builder
   brand() {
     Row({ space: 10 }) {
-      Text('c/')
-        .fontSize(23)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(CARD_BACKGROUND)
+      Image($r('app.media.app_icon'))
         .width(40)
         .height(40)
-        .textAlign(TextAlign.Center)
-        .backgroundColor(GREEN)
-        .borderRadius(13)
+        .objectFit(ImageFit.Contain)
+        .accessibilityLevel('no')
       Text('Codex 随行').fontSize(20).fontWeight(FontWeight.Medium).fontColor(INK)
     }
   }
@@ -187,8 +183,14 @@ struct Index {
     Row({ space: 12 }) {
       this.brand()
       Blank()
-      Button('＋').id('add-server').fontSize(27).width(46).height(46).backgroundColor(GREEN)
-        .accessibilityText('添加 Server').onClick(() => this.store.editServer())
+      Button() {
+        Row({ space: 6 }) {
+          Image($r('app.media.add_connection')).width(20).height(20).objectFit(ImageFit.Contain)
+            .accessibilityLevel('no')
+          Text('连接').fontSize(14).fontWeight(FontWeight.Medium).fontColor(CARD_BACKGROUND)
+        }.justifyContent(FlexAlign.Center)
+      }.id('add-server').width(88).height(46).padding(0).borderRadius(23).backgroundColor(GREEN)
+        .accessibilityText('添加连接').onClick(() => this.store.editServer())
     }.width('100%').padding(20)
     Row() {
       Text('你的机器').fontSize(22).fontWeight(FontWeight.Medium).fontColor(INK)
