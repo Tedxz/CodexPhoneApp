@@ -60,7 +60,7 @@ ${Object.entries(environment)
   .join('\n')}
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>15</integer>
   <key>Umask</key><integer>63</integer>
   <key>StandardOutPath</key><string>${xml(path.join(logs, 'gateway.out.log'))}</string>
@@ -79,6 +79,7 @@ ${Object.entries(environment)
   console.log(`检查：plutil -lint ${shellQuote(output)}`);
   console.log(`启动：launchctl bootstrap gui/$(id -u) ${shellQuote(output)}`);
   console.log(`停止：launchctl bootout gui/$(id -u)/${LABEL}`);
+  console.log('登录后自动启动，进程退出后自动恢复；停止服务请使用上面的 bootout 命令。');
   console.log('更改配置后重新加载服务；Node.js 路径变化后重新生成 plist。');
 }
 

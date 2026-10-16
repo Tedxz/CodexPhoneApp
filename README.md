@@ -35,7 +35,7 @@ npm run pair
 
 默认入口 `http://127.0.0.1:8787` 只能在这台电脑访问。配对凭据有效期 5 分钟，只能使用一次；设备登录有效期 30 天。手机使用前请按下面选择局域网或 Funnel 入口。
 
-本机当前公网入口（2026-10-16）为 [https://xz-macbookair.tail9ddfa1.ts.net](https://xz-macbookair.tail9ddfa1.ts.net)。Funnel 443 已开启，公网 HTTPS 健康检查返回 `200` 且 TLS 验证通过；用户已确认页面打开。局域网入口 [http://192.168.0.118:8787](http://192.168.0.118:8787) 也已恢复，由独立网关进程提供；两进程共用设备数据目录，现有设备记录保留。HarmonyOS 原生客户端已在实体手机完成该域名的 HTTPS 配对、WSS 连接与真实对话；手机蜂窝网络切换仍待验收。
+本机当前公网入口（2026-10-16）为 [https://xz-macbookair.tail9ddfa1.ts.net](https://xz-macbookair.tail9ddfa1.ts.net)。本机部署只保留监听 `127.0.0.1:8787` 的 Funnel 网关，由 macOS LaunchAgent 在用户登录后启动并持续保活，局域网网关停用。Tailscale 使用已有的登录启动配置；Codex 由用户手动打开，网关会自动重连共享后端。安装、启停、更新和排查步骤见 [本机 Funnel 网关配置与维护](docs/FUNNEL-SERVICE.md)。此前已通过公网 HTTPS 健康检查与 TLS 验证，HarmonyOS 原生客户端已在实体手机完成该域名的 HTTPS 配对、WSS 连接与真实对话；手机蜂窝网络切换仍待验收。
 
 `doctor` 只检查配置、构建产物、Codex 版本和共享 socket 握手/列表查询，不创建或继续任务，不修改系统设置。失败时先处理它给出的具体连接原因。
 
@@ -74,13 +74,13 @@ npm run revoke -- 设备ID
 
 客户端列表按同一 App 安装或同一浏览器站点实例识别，重复配对复用记录，并显示客户端类型、首次配对和最近使用时间。原生 App 的局域网与 Funnel 授权可归入同一记录；浏览器不同来源分别识别。旧记录会在原客户端访问后迁移，无法确认来源的历史记录标为「旧版授权」，可逐项撤销。撤销或退出一个客户端会使其全部入口授权及现有连接失效。前台网关按 `Ctrl+C` 停止；手机断开或网关停止不等同于停止正在电脑端运行的 Codex 任务，需要时先在对话中点击停止。
 
-可选的 macOS 登录启动配置：
+生成 macOS 登录启动配置：
 
 ```sh
 node --import tsx scripts/launch-agent.ts
 ```
 
-默认仅输出 plist 供检查。使用 `--install` 会将文件保存到当前用户的 LaunchAgents 目录，但不会加载服务；具体启停命令见 [部署说明](docs/DEPLOYMENT.md)。本项目的安装和启动不会自动开启 Funnel、启动另一个 Codex 后端或修改全局 Codex 配置。
+默认仅输出 plist 供检查。使用 `--install` 会将 `local.codex-phone.plist` 保存到当前用户的 LaunchAgents 目录，但不会加载服务。加载后网关正常退出或异常退出都会重新启动；主动停止请使用 `launchctl bootout`，不能仅结束进程。具体启停和永久停用命令见 [部署说明](docs/DEPLOYMENT.md)。服务随当前用户登录启动，不提供开机未登录时的访问；本项目不会自动开启 Funnel、启动 Codex 或修改全局 Codex 配置。
 
 ## 开发与验证
 
@@ -105,6 +105,7 @@ npm run test:live -- --run
 
 前端开发可同时运行 `npm run dev` 和 `npm run web:dev`，并在配置的 `allowedOrigins` 中加入 `http://127.0.0.1:5173`，使用 `npm run pair -- --url http://127.0.0.1:5173` 配对。日常手机访问使用 `npm run build` 后由网关统一提供网页。
 
+- [本机 Funnel 网关配置与维护](docs/FUNNEL-SERVICE.md)
 - [部署、HTTPS、故障排查](docs/DEPLOYMENT.md)
 - [接口与重连约定](docs/API.md)
 - [真实共享后端与手机验收](docs/ACCEPTANCE.md)

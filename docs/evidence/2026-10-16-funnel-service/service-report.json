@@ -1,0 +1,21 @@
+{
+  "checkedAt": "2026-10-16T00:09:15.368Z",
+  "service": "local.codex-phone",
+  "domain": "gui/501",
+  "plistInstalled": true,
+  "plistMode": "600",
+  "runAtLoad": true,
+  "keepAlive": true,
+  "throttleSeconds": 15,
+  "loopbackHealth": 200,
+  "gracefulExitRecovery": true,
+  "forcedExitRecovery": true,
+  "unloadReload": true,
+  "lanGatewayStopped": true,
+  "lanListenerClosed": true,
+  "tailscaleStartupChanged": false,
+  "codexStartupChanged": false,
+  "codexTasksMutated": false,
+  "actualLogoutOrRebootPerformed": false,
+  "finalPid": 14258
+}
