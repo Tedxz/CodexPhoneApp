@@ -36,6 +36,33 @@ propagated. Runtime turn identity comes from resume, notifications, or
 `expectedTurnId`. Timeouts and disconnects never retry mutations. Model values
 sent to Codex use `model/list`'s `model` slug, not the catalog `id`.
 
+Conversation items expose optional `createdAt` in Unix milliseconds from the
+item-entry or `item/started` notification's recorded `startedAtMs`. Only safe,
+nonnegative integer timestamps within the JavaScript Date range are accepted.
+The recorded start is retained in an 8192-entry metadata cache across deltas,
+completion, refreshes and reconnects, independently of generation-scoped live content.
+`completedAtMs`, the current clock,
+and thread/turn timestamps are not substitutes for a message's start time. Legacy
+turn-history responses and completion-only events therefore leave it absent when
+no start time is known. The generated local lifecycle schemas and the
+[official item pagination documentation](https://learn.chatgpt.com/docs/app-server#list-thread-items)
+describe these per-item timestamp fields.
+
+`ThreadSnapshot.contextUser` supplies the nearest proven user message preceding
+the earliest item in a partial page. It is separate from `items` and never
+changes pagination. Native older pages are scanned in descending item order,
+including steering messages within the same turn; a turn's first user is not a
+substitute. The optional lookup is limited to 16 pages (100 items per native item
+page), 8 MiB of decoded responses, and a shared three-second deadline enforced on
+each RPC. A failed or
+incomplete lookup leaves context absent while retaining the usable main page.
+Full-read compatibility derives context from the already retrieved entries.
+An 8192-entry cache keys proven context to exact thread/item anchors, stops scans
+at previously proven anchors, deduplicates concurrent scans, and suppresses
+failed-anchor retries for 30 seconds. Context
+caches are cleared on backend reconnect. Image paths on context messages undergo
+the same upload-ownership filtering and URL mapping as timeline messages.
+
 A newly created thread is not materialized until its first user message. The
 live 0.162.1 server returns an exact `-32600` condition for history on such a
 thread; the adapter treats it as empty only when fresh metadata also says idle.

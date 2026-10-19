@@ -1,4 +1,5 @@
 import { ConversationItem, EventEnvelope, GatewayEvent, ThreadSnapshot, ThreadSummary } from './Protocol';
+import { validMessageTime } from './Timeline';
 
 function copyItem(item: ConversationItem, text: string, status: string | undefined): ConversationItem {
   return {
@@ -7,6 +8,7 @@ function copyItem(item: ConversationItem, text: string, status: string | undefin
     type: item.type,
     role: item.role,
     text: text,
+    createdAt: item.createdAt,
     status: status,
     images: item.images
   };
@@ -16,6 +18,7 @@ function copySnapshot(snapshot: ThreadSnapshot): ThreadSnapshot {
   return {
     thread: snapshot.thread,
     items: snapshot.items,
+    contextUser: snapshot.contextUser,
     nextCursor: snapshot.nextCursor,
     pendingRequests: snapshot.pendingRequests,
     settings: snapshot.settings,
@@ -28,7 +31,16 @@ function copySnapshot(snapshot: ThreadSnapshot): ThreadSnapshot {
 export function mergeItems(previous: ConversationItem[], incoming: ConversationItem[], prepend: boolean = false): ConversationItem[] {
   const entries = new Map<string, ConversationItem>();
   previous.forEach((item: ConversationItem) => entries.set(item.id, item));
-  incoming.forEach((item: ConversationItem) => entries.set(item.id, item));
+  incoming.forEach((item: ConversationItem) => {
+    const previousItem = entries.get(item.id);
+    if (!validMessageTime(item.createdAt) && previousItem && validMessageTime(previousItem.createdAt)) {
+      const retained = copyItem(item, item.text, item.status);
+      retained.createdAt = previousItem.createdAt;
+      entries.set(item.id, retained);
+    } else {
+      entries.set(item.id, item);
+    }
+  });
   const outcomes = new Map<string, string>();
   entries.forEach((item: ConversationItem) => {
     if (item.id === `outcome:${item.turnId}` && (item.status === 'interrupted' || item.status === 'failed')) {
@@ -131,6 +143,12 @@ export class SnapshotTracker {
     }
     let result = copySnapshot(incoming);
     result.items = mergeItems(sameThread ? sameThread.items : [], incoming.items, prepend);
+    // Context belongs to the oldest loaded page, not the latest refresh.
+    if (sameThread?.items.length && result.items[0]?.id === sameThread.items[0].id &&
+      result.items[0]?.id !== incoming.items[0]?.id) result.contextUser = sameThread.contextUser;
+    if (!result.contextUser && sameThread?.items[0]?.id === incoming.items[0]?.id) {
+      result.contextUser = sameThread?.contextUser;
+    }
     // History pages describe older content, never the current writer access.
     if (prepend && sameThread) result.readOnly = sameThread.readOnly;
     if (!cursor) return result;

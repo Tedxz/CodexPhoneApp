@@ -7,6 +7,7 @@ import { Attachment, ConversationItem, Device, ModelOption, PendingRequest, Proj
   WorkspaceSummary } from '../model/Protocol';
 import { ServerCard } from '../components/ServerCard';
 import { MessageCard } from '../components/MessageCard';
+import { messageTime, readingUser, userSummary } from '../model/Timeline';
 import { RequestCard } from '../components/RequestCard';
 import { SettingsControls } from '../components/SettingsControls';
 import { BORDER, CARD_BACKGROUND, ERROR, GREEN, INK, MUTED, PAGE_BACKGROUND, PALE_GREEN,
@@ -23,11 +24,18 @@ struct Index {
   private timeline: Scroller = new Scroller();
   @State followLatest: boolean = true;
   private timelineTimer: number = -1;
+  private readingTimer: number = -1;
+  private firstVisibleMessage: number = 0;
+  private timelineGeneration: number = 0;
+  @State pinnedUser: ConversationItem | undefined = undefined;
+  @State userOriginalOpen: boolean = false;
+  @State userOriginalItem: ConversationItem = { id: '', turnId: '', type: '', text: '' };
 
   aboutToAppear(): void {
     // Resize scrollable content instead of translating the page beneath the transparent status bar.
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
     this.store.onTimelineChanged = () => {
+      this.scheduleReadingContext();
       if (this.store.screen !== 'chat' || this.store.loading || this.store.olderBusy || !this.followLatest) return;
       if (this.timelineTimer >= 0) return;
       this.timelineTimer = setTimeout(() => {
@@ -40,6 +48,7 @@ struct Index {
 
   aboutToDisappear(): void {
     clearTimeout(this.timelineTimer);
+    clearTimeout(this.readingTimer);
     this.timelineTimer = -1;
     this.store.onTimelineChanged = () => {};
     this.store.dispose();
@@ -147,6 +156,94 @@ struct Index {
   private jumpToLatest(): void {
     this.followLatest = true;
     this.timeline.scrollEdge(Edge.Bottom);
+  }
+
+  private scheduleReadingContext(): void {
+    clearTimeout(this.readingTimer);
+    this.readingTimer = setTimeout(() => {
+      this.readingTimer = -1;
+      this.updateReadingContext();
+    }, 80);
+  }
+
+  private updateReadingContext(): void {
+    if (this.store.screen !== 'chat' || this.store.loading || !this.store.snapshot) {
+      this.pinnedUser = undefined;
+      return;
+    }
+    try {
+      const rect = this.timeline.getItemRect(this.firstVisibleMessage);
+      const index = this.firstVisibleMessage - (this.store.snapshot.nextCursor ? 1 : 0);
+      const next = readingUser(this.store.snapshot.items, index, rect.y, this.store.snapshot.contextUser);
+      if (JSON.stringify(next) !== JSON.stringify(this.pinnedUser)) this.pinnedUser = next;
+    } catch {
+      // A new thread can replace the list before its first layout pass.
+      this.pinnedUser = undefined;
+    }
+  }
+
+  private viewPinnedUser(): void {
+    const user = this.pinnedUser;
+    if (!user) return;
+    const index = this.store.snapshot?.items.findIndex((item: ConversationItem) => item.id === user.id) ?? -1;
+    if (index >= 0) {
+      this.followLatest = false;
+      this.timeline.scrollToIndex(index + (this.store.snapshot?.nextCursor ? 1 : 0), false, ScrollAlign.START);
+    } else {
+      this.userOriginalItem = user;
+      this.userOriginalOpen = true;
+    }
+  }
+
+  private async loadEarlierMessages(): Promise<void> {
+    const snapshot = this.store.snapshot;
+    if (!snapshot || this.store.olderBusy) return;
+    const generation = this.timelineGeneration;
+    const messageIndex = Math.max(0, this.firstVisibleMessage - (snapshot.nextCursor ? 1 : 0));
+    const anchor = snapshot.items[messageIndex];
+    let top = 0;
+    try { top = this.timeline.getItemRect(messageIndex + (snapshot.nextCursor ? 1 : 0)).y; } catch { /* List was replaced. */ }
+    this.followLatest = false;
+    await this.store.loadOlder();
+    if (generation !== this.timelineGeneration || this.store.snapshot?.thread.id !== snapshot.thread.id || this.store.screen !== 'chat') return;
+    if (anchor) {
+      const index = this.store.snapshot.items.findIndex((item: ConversationItem) => item.id === anchor.id);
+      if (index >= 0) {
+        setTimeout(() => {
+          if (generation !== this.timelineGeneration || this.store.snapshot?.thread.id !== snapshot.thread.id || this.store.screen !== 'chat') return;
+          this.timeline.scrollToIndex(index + (this.store.snapshot.nextCursor ? 1 : 0), false, ScrollAlign.START);
+          this.timeline.scrollBy(0, -top);
+          this.scheduleReadingContext();
+        }, 80);
+      }
+    }
+  }
+
+  @Builder
+  userOriginal() {
+    Scroll() {
+      MessageCard({ item: this.userOriginalItem, imageSource: (path: string): string => this.store.imageUrl(path) })
+    }.width('100%').height('100%').padding(16)
+  }
+
+  @Builder
+  pinnedUserBar() {
+    Column({ space: 5 }) {
+      Row({ space: 8 }) {
+        Text('当前提问').fontSize(11).fontWeight(FontWeight.Medium).fontColor(GREEN)
+        Text(messageTime(this.pinnedUser?.createdAt)).fontSize(11).fontColor(MUTED).layoutWeight(1)
+        Text('查看原文 ›').fontSize(11).fontColor(GREEN)
+      }.width('100%')
+      Text(this.pinnedUser ? userSummary(this.pinnedUser) : '')
+        .fontSize(13).lineHeight(19).fontColor(INK).maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+    }
+    .id('reading-user-context')
+    .alignItems(HorizontalAlign.Start)
+    .width('100%').padding({ left: 14, right: 14, top: 10, bottom: 10 })
+    .backgroundColor(PALE_GREEN).border({ width: 1, color: BORDER }).borderRadius(14)
+    .accessibilityText(`当前提问：${this.pinnedUser ? userSummary(this.pinnedUser) : ''}，查看原文`)
+    .onClick(() => this.viewPinnedUser())
   }
 
   private composerModel(): string {
@@ -788,7 +885,7 @@ struct Index {
             ListItem() {
               Button(this.store.olderBusy ? '正在加载…' : '查看更早的消息')
                 .height(44).width('100%').fontSize(13).fontColor(GREEN).backgroundColor(PALE_GREEN)
-                .enabled(!this.store.olderBusy).onClick(() => this.store.loadOlder())
+                .enabled(!this.store.olderBusy).onClick(() => this.loadEarlierMessages())
             }
           }
           ForEach(this.store.snapshot?.items || [], (item: ConversationItem) => {
@@ -831,16 +928,40 @@ struct Index {
         .scrollBar(BarState.Off)
         .onDidScroll((_offset: number, state: ScrollState) => {
           if (state !== ScrollState.Idle) this.followLatest = this.timeline.isAtEnd();
+          this.updateReadingContext();
         })
-        .onScrollStop(() => this.followLatest = this.timeline.isAtEnd())
+        .onScrollIndex((start: number) => {
+          this.firstVisibleMessage = start;
+          this.updateReadingContext();
+        })
+        .onScrollStop(() => {
+          this.followLatest = this.timeline.isAtEnd();
+          this.updateReadingContext();
+        })
+        .onAreaChange(() => this.scheduleReadingContext())
         .onReachEnd(() => this.followLatest = true)
         .onAppear(() => {
+          this.timelineGeneration++;
+          this.pinnedUser = undefined;
+          this.firstVisibleMessage = 0;
           clearTimeout(this.timelineTimer);
           this.timelineTimer = setTimeout(() => {
             this.timelineTimer = -1;
             if (this.store.screen === 'chat') this.jumpToLatest();
+            this.scheduleReadingContext();
           }, 80);
         })
+        .onDisAppear(() => {
+          this.timelineGeneration++;
+          this.pinnedUser = undefined;
+          this.userOriginalOpen = false;
+          clearTimeout(this.readingTimer);
+        })
+        if (this.pinnedUser) {
+          Column() { this.pinnedUserBar() }
+            .width('100%').height('100%').padding({ left: 16, right: 16 })
+            .justifyContent(FlexAlign.Start).hitTestBehavior(HitTestMode.Transparent)
+        }
         if (!this.followLatest) {
           Button({ type: ButtonType.Capsule }) {
             Row({ space: 4 }) {
@@ -855,6 +976,10 @@ struct Index {
           .onClick(() => this.jumpToLatest())
         }
       }.layoutWeight(1).width('100%').clip(true)
+      .bindSheet(this.userOriginalOpen, this.userOriginal(), {
+        height: '70%', title: { title: '用户消息' },
+        onDisappear: () => { this.userOriginalOpen = false; }
+      })
     }
     this.composer()
   }

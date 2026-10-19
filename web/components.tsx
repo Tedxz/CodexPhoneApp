@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {
@@ -9,6 +9,7 @@ import type {
   SessionSettings,
 } from '../shared/protocol';
 import { safeImageUrl, describeError } from './state';
+import { formatMessageTime, validMessageTime } from './message-time';
 
 export function Icon({
   name,
@@ -95,8 +96,11 @@ export function Message({
       </details>
     );
   return (
-    <article className={`message ${item.role}`}>
-      <div className="message-meta">{item.role === 'user' ? '你' : 'CODEX'}</div>
+    <article className={`message ${item.role}`} data-message-id={item.id} tabIndex={-1}>
+      <div className="message-meta">
+        <span>{item.role === 'user' ? '你' : 'CODEX'}</span>
+        <MessageTime createdAt={item.createdAt} />
+      </div>
       <div className="message-body">
         {item.role === 'assistant' ? <Markdown text={item.text || '…'} /> : <p>{item.text}</p>}
         {!!item.images?.length && (
@@ -113,6 +117,55 @@ export function Message({
         )}
       </div>
     </article>
+  );
+}
+export function MessageTime({ createdAt }: { createdAt?: number }) {
+  const date = validMessageTime(createdAt) ? new Date(createdAt) : undefined;
+  return (
+    <time
+      className="message-time"
+      dateTime={date?.toISOString()}
+      title={date?.toLocaleString('zh-CN', { hour12: false }) || '未提供消息时间'}
+    >
+      {formatMessageTime(createdAt)}
+    </time>
+  );
+}
+export function PromptDialog({
+  item,
+  targetId,
+  onClose,
+}: {
+  item: ConversationItem;
+  targetId: string;
+  onClose(): void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="prompt-dialog"
+      aria-labelledby="prompt-dialog-title"
+      onCancel={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section>
+        <div className="prompt-dialog-head">
+          <h2 id="prompt-dialog-title">完整提问</h2>
+          <button className="icon-button" aria-label="关闭完整提问" onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        </div>
+        <Message item={item} targetId={targetId} />
+      </section>
+    </dialog>
   );
 }
 export function ModelControls({

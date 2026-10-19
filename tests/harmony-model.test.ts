@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import ts from 'typescript';
 import type {
   Bootstrap,
+  ConversationItem,
   Device,
   EventEnvelope,
   SessionSettings,
@@ -122,6 +123,110 @@ interface StateModule {
   applyEvent: typeof import('../web/state').applyEvent;
 }
 const state = nativeModule<StateModule>('model/State');
+
+interface TimelineModule {
+  messageTime(value?: number, now?: number): string;
+  readingUser(
+    items: ConversationItem[],
+    firstVisible: number,
+    top: number,
+    context?: ConversationItem,
+  ): ConversationItem | undefined;
+  userSummary(item: ConversationItem): string;
+}
+const timeline = nativeModule<TimelineModule>('model/Timeline');
+
+test('Harmony reading context follows both scroll directions and handles steering within one turn', () => {
+  const user = (id: string): ConversationItem => ({
+    id,
+    turnId: 'turn',
+    type: 'userMessage',
+    role: 'user',
+    text: id,
+  });
+  const tool: ConversationItem = {
+    id: 'tool',
+    turnId: 'turn',
+    type: 'commandExecution',
+    text: 'running',
+  };
+  const items = [user('first'), tool, user('steering'), { ...tool, id: 'last' }];
+  assert.equal(timeline.readingUser(items, -1, 0), undefined);
+  assert.equal(timeline.readingUser(items, 0, 0), undefined);
+  assert.equal(timeline.readingUser(items, 0, -2)?.id, 'first');
+  assert.equal(timeline.readingUser(items, 1, -30)?.id, 'first');
+  assert.equal(timeline.readingUser(items, 2, 0), undefined);
+  assert.equal(timeline.readingUser(items, 2, -10)?.id, 'steering');
+  assert.equal(timeline.readingUser(items, 4, 0)?.id, 'steering');
+  assert.equal(timeline.readingUser(items, 1, -10)?.id, 'first');
+  assert.equal(timeline.readingUser([tool], 0, 0, user('outside-page'))?.id, 'outside-page');
+  assert.equal(timeline.readingUser([], 0, 0, user('outside-page')), undefined);
+  assert.equal(timeline.readingUser([tool], 0, 0, tool), undefined);
+  assert.equal(
+    timeline.userSummary({ ...user('image'), text: '', images: ['/api/v1/uploads/image.png'] }),
+    '图片消息',
+  );
+  assert.equal(timeline.userSummary({ ...user('long'), text: 'a\n\n b\t c' }), 'a b c');
+});
+
+test('Harmony message times use actual local dates and do not invent unknown times', () => {
+  const now = new Date(2026, 9, 19, 15, 30).getTime();
+  assert.equal(timeline.messageTime(new Date(2026, 9, 19, 9, 5).getTime(), now), '09:05');
+  assert.equal(timeline.messageTime(new Date(2026, 9, 18, 0, 2).getTime(), now), '10月18日 00:02');
+  assert.equal(
+    timeline.messageTime(new Date(2025, 11, 31, 23, 59).getTime(), now),
+    '2025年12月31日 23:59',
+  );
+  for (const value of [undefined, 0, -1, NaN, Infinity, 1e20]) {
+    assert.equal(timeline.messageTime(value, now), '时间未知');
+  }
+});
+
+test('Harmony retains message time through deltas and timestamp-less updates', () => {
+  const createdAt = new Date(2026, 9, 19, 9, 5).getTime();
+  const original = snapshot('start', 1);
+  original.items[0].createdAt = createdAt;
+  const updated = state.applyEvent(original, delta(2, ' more').event)!;
+  assert.equal(updated.items[0].createdAt, createdAt);
+  const missing = { ...updated.items[0], createdAt: undefined };
+  assert.equal(state.mergeItems(updated.items, [missing])[0].createdAt, createdAt);
+  assert.equal(
+    state.mergeItems(updated.items, [{ ...missing, createdAt: NaN }])[0].createdAt,
+    createdAt,
+  );
+  const tracker = new state.SnapshotTracker();
+  assert.equal(tracker.reconcile(updated, snapshot('refreshed', 3)).items[0].createdAt, createdAt);
+});
+
+test('Harmony context belongs to the oldest merged page across refresh, paging and thread switches', () => {
+  const tracker = new state.SnapshotTracker();
+  const page = (id: string, contextId?: string): ThreadSnapshot => ({
+    ...snapshot(id, 1),
+    items: [{ id, turnId: 'turn', type: 'agentMessage', role: 'assistant', text: id }],
+    contextUser: contextId
+      ? { id: contextId, turnId: 'turn', type: 'userMessage', role: 'user', text: contextId }
+      : undefined,
+  });
+  let current = tracker.reconcile(undefined, page('latest', 'latest-user'));
+  current = tracker.reconcile(current, page('latest'));
+  assert.equal(current.contextUser?.id, 'latest-user');
+  current = tracker.reconcile(current, page('older', 'older-user'), true);
+  assert.equal(current.contextUser?.id, 'older-user');
+  current = tracker.reconcile(current, page('latest', 'latest-user'));
+  assert.equal(current.contextUser?.id, 'older-user');
+  assert.equal(state.applyEvent(current, delta(2, ' more').event)?.contextUser?.id, 'older-user');
+  current = tracker.reconcile(current, page('oldest'), true);
+  assert.equal(current.contextUser, undefined);
+  current = tracker.reconcile(current, {
+    ...page('other', 'other-user'),
+    thread: { ...current.thread, id: 'other-thread' },
+  });
+  assert.equal(current.contextUser?.id, 'other-user');
+  assert.deepEqual(
+    current.items.map((item) => item.id),
+    ['other'],
+  );
+});
 
 function snapshot(text: string, seq: number): ThreadSnapshot {
   return {
@@ -742,6 +847,107 @@ test('Harmony native live client authenticates WSS, filters duplicate events and
   }
 });
 
+test('Harmony reconnects once after a native send failure without replaying uncertain commands', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const sockets: {
+    listeners: Map<string, (...args: unknown[]) => void>;
+    sent: string[];
+    closed: number;
+  }[] = [];
+  let nextId = 0;
+  const kits = new Map<string, object>([
+    ['@kit.BasicServicesKit', { deviceInfo: { sdkApiVersion: 26 } }],
+    ['@kit.ArkTS', { util: { generateRandomUUID: () => `request-${++nextId}` } }],
+    [
+      '@kit.NetworkKit',
+      {
+        http: {},
+        webSocket: {
+          createWebSocket() {
+            const state = {
+              listeners: new Map<string, (...args: unknown[]) => void>(),
+              sent: [] as string[],
+              closed: 0,
+            };
+            sockets.push(state);
+            return {
+              on: (name: string, callback: (...args: unknown[]) => void) =>
+                state.listeners.set(name, callback),
+              off: (name: string) => state.listeners.delete(name),
+              connect: async () => true,
+              async send(payload: string) {
+                state.sent.push(payload);
+                if (state === sockets[0] && state.sent.length === 1)
+                  throw new Error('native transport write failed');
+                return true;
+              },
+              async close() {
+                state.closed++;
+                return true;
+              },
+            };
+          },
+        },
+      },
+    ],
+  ]);
+  const { NativeLiveClient } = nativeModule<NativeLiveModule>('transport/NativeLiveClient', kits);
+  const statuses: boolean[] = [];
+  let resyncs = 0;
+  const client = new NativeLiveClient(
+    {
+      origin: 'https://example.com',
+      cookie: `codex_phone=${token}`,
+      targetPrefix: '/api/v1',
+      bootstrap: async () => ({}),
+    },
+    {
+      status: (connected) => statuses.push(connected),
+      event() {},
+      resync: () => resyncs++,
+      unauthorized() {
+        assert.fail('A transport failure must not revoke the saved login');
+      },
+    },
+  );
+  try {
+    client.connect();
+    const first = sockets[0];
+    first.listeners.get('open')?.(undefined, {});
+    const lateClose = first.listeners.get('close');
+    const lateError = first.listeners.get('error');
+    const uncertain = client.command('turn.send', '{"threadId":"thread","text":"hello"}');
+    const pendingRead = client.command('thread.subscribe', '{"threadId":"thread"}');
+    await Promise.all([
+      assert.rejects(uncertain, /结果/),
+      assert.rejects(pendingRead, /结果尚未确认/),
+    ]);
+    assert.deepEqual(statuses, [true, false]);
+    assert.equal(first.closed, 1);
+    assert.equal(sockets.length, 1);
+    // Native callbacks may arrive late after the rejected send already detached the socket.
+    lateClose?.(undefined, { code: 1006 });
+    lateError?.(new Error('late native callback'));
+    context.mock.timers.tick(1000);
+    assert.equal(sockets.length, 2);
+    sockets[1].listeners.get('open')?.(undefined, {});
+    context.mock.timers.tick(15000);
+    assert.equal(sockets.length, 2, 'Only one reconnect may be scheduled');
+    assert.equal(resyncs, 2, 'Opening the replacement socket requests a fresh snapshot');
+    assert.deepEqual(statuses, [true, false, true]);
+    assert.equal(sockets[1].sent.length, 0, 'Neither writes nor reads are replayed automatically');
+    const freshRead = client.command('thread.subscribe', '{"threadId":"thread"}');
+    const request = JSON.parse(sockets[1].sent[0]) as { id: string };
+    sockets[1].listeners.get('message')?.(
+      undefined,
+      JSON.stringify({ id: request.id, result: { synchronized: true } }),
+    );
+    assert.equal(await freshRead, '{"synchronized":true}');
+  } finally {
+    client.close();
+  }
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
@@ -851,6 +1057,7 @@ interface NativeAppStore {
   draft: string;
   attachments: { id: string; url: string; name: string; localUri: string }[];
   settings: SessionSettings;
+  models: object[];
   readOnly: boolean;
   retryingWrite: boolean;
   snapshot?: ThreadSnapshot;
@@ -867,6 +1074,7 @@ interface NativeAppStore {
   loadList(cursor?: string): Promise<void>;
   selectWorkspace(cwd: string): void;
   chooseThread(id: string): Promise<void>;
+  backToThreads(): void;
   setDraft(text: string): void;
   setModel(value: string): void;
   setEffort(value: string): void;
@@ -1004,11 +1212,14 @@ function mockedStore() {
   }
   class FakeLive implements NativeLive {
     closed = false;
+    connected = false;
     constructor(
       _api: StoreApi,
       private handlers: NativeLiveHandlers,
     ) {}
     connect() {
+      if (this.closed || this.connected) return;
+      this.connected = true;
       queueMicrotask(() => {
         if (this.closed) return;
         this.handlers.status(true);
@@ -1476,6 +1687,7 @@ test('Harmony opens read-only history, refreshes without requesting a writer and
 test('Harmony restores editing only through an explicit request and ignores stale refresh or history access flags', async () => {
   const { store, responses, activate } = mockedStore();
   activate();
+  store.screen = 'chat';
   store.selected = 'thread';
   store.snapshot = { ...snapshot('read-only history', 1), nextCursor: 'older', readOnly: true };
   store.draft = 'preserved on restore';
@@ -1588,6 +1800,152 @@ test('Harmony native store can restore a saved login after the first offline boo
     assert.equal(store.live, true);
     assert.ok(bootstraps >= 2 && bootstraps <= 5);
   } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony chat refresh bypasses stalled catalogs and keeps command notices while synchronizing', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  store.screen = 'chat';
+  store.selected = 'thread';
+  store.snapshot = snapshot('old history', 1);
+  store.draft = 'keep this unsent draft';
+  store.notice = 'Earlier send has an uncertain result';
+  const catalog = deferred<{ data: WorkspaceSummary[] }>();
+  let lists = 0;
+  let models = 0;
+  const commands: string[] = [];
+  store.api!.workspaces = () => {
+    lists++;
+    return catalog.promise;
+  };
+  store.api!.models = async () => {
+    models++;
+    throw new Error('unrelated model catalog failure');
+  };
+  responses.command = async (method) => {
+    commands.push(method);
+    return JSON.stringify(snapshot('latest history', 2));
+  };
+  const refreshing = store.refresh();
+  try {
+    await tick();
+    assert.equal(store.snapshot?.items[0].text, 'latest history');
+    await refreshing;
+    assert.deepEqual(commands, ['thread.subscribe']);
+    assert.equal(lists, 0);
+    assert.equal(models, 0);
+    assert.equal(store.error, '');
+    assert.equal(store.notice, 'Earlier send has an uncertain result');
+    assert.equal(store.draft, 'keep this unsent draft');
+    // Returning to the browser restores normal catalog/model refresh.
+    store.api!.models = async () => {
+      models++;
+      return { data: [{ id: 'refreshed-model' }] };
+    };
+    store.backToThreads();
+    await tick();
+    assert.equal(lists, 1);
+    catalog.resolve({ data: [] });
+    await tick();
+    assert.equal(models, 1);
+    assert.deepEqual(store.models, [{ id: 'refreshed-model' }]);
+  } finally {
+    catalog.resolve({ data: [] });
+    await refreshing;
+    store.dispose();
+  }
+});
+
+test('Harmony restores its live connection before a slow directory request completes', async () => {
+  const { store, activate } = mockedStore();
+  activate();
+  store.client = undefined;
+  store.live = false;
+  const catalog = deferred<{ data: WorkspaceSummary[] }>();
+  store.api!.workspaces = () => catalog.promise;
+  const refreshing = store.refresh();
+  try {
+    await tick();
+    assert.ok(store.client, 'The live client must exist while catalog work is still pending');
+    assert.equal(store.live, true);
+    catalog.resolve({ data: [] });
+    await refreshing;
+    await tick();
+  } finally {
+    catalog.resolve({ data: [] });
+    await refreshing;
+    store.dispose();
+  }
+});
+
+test('Harmony returns to fresh catalogs even when the previous chat can no longer be subscribed', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  store.screen = 'chat';
+  store.selected = 'deleted-thread';
+  store.snapshot = {
+    ...snapshot('previous chat', 1),
+    thread: { ...snapshot('', 1).thread, id: 'deleted-thread' },
+  };
+  let subscriptions = 0;
+  let lists = 0;
+  let models = 0;
+  responses.command = async () => {
+    subscriptions++;
+    throw new Error('thread no longer exists');
+  };
+  store.api!.workspaces = async () => {
+    lists++;
+    return { data: [] };
+  };
+  store.api!.models = async () => {
+    models++;
+    return { data: [{ id: 'current-model' }] };
+  };
+  try {
+    store.backToThreads();
+    await tick();
+    assert.equal(store.screen, 'threads');
+    assert.equal(store.selected, 'deleted-thread');
+    assert.equal(subscriptions, 0, 'An inactive selection must not gate catalog refresh');
+    assert.equal(lists, 1);
+    assert.equal(models, 1);
+    assert.deepEqual(store.models, [{ id: 'current-model' }]);
+    assert.equal(store.error, '');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('Harmony queues a fresh chat snapshot when reconnect resync arrives during recovery', async () => {
+  const { store, responses, activate } = mockedStore();
+  activate();
+  store.screen = 'chat';
+  store.selected = 'thread';
+  store.snapshot = snapshot('old history', 1);
+  const bootstrap = deferred<Bootstrap>();
+  let bootstraps = 0;
+  let reads = 0;
+  responses.bootstrap = () => {
+    bootstraps++;
+    return bootstraps === 1 ? bootstrap.promise : Promise.resolve(connectedBootstrap());
+  };
+  responses.command = async () => JSON.stringify(snapshot(`recovered ${++reads}`, reads));
+  const refreshing = store.refresh();
+  try {
+    await tick();
+    void store.refresh();
+    bootstrap.resolve(connectedBootstrap());
+    await refreshing;
+    await tick();
+    assert.equal(bootstraps, 2);
+    assert.equal(reads, 2);
+    assert.equal(store.snapshot?.items[0].text, 'recovered 2');
+  } finally {
+    bootstrap.resolve(connectedBootstrap());
+    await refreshing;
     store.dispose();
   }
 });

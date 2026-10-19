@@ -1,5 +1,6 @@
 import { ConversationItem } from '../model/Protocol';
 import { MarkdownText } from './MarkdownText';
+import { messageTime } from '../model/Timeline';
 import { BORDER, CARD_BACKGROUND, ERROR, GREEN, INK, MUTED, PALE_GREEN, itemStatus, toolLabel } from './Theme';
 
 @Component
@@ -12,11 +13,19 @@ export struct MessageCard {
   build() {
     if (this.item.role) {
       Column({ space: 10 }) {
-        Text(this.item.role === 'user' ? '你' : 'CODEX')
-          .fontSize(11)
-          .letterSpacing(1.5)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.item.role === 'user' ? GREEN : MUTED)
+        Row({ space: 8 }) {
+          Text(this.item.role === 'user' ? '你' : 'CODEX')
+            .fontSize(11)
+            .letterSpacing(1.5)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.item.role === 'user' ? GREEN : MUTED)
+          Blank()
+          Text(messageTime(this.item.createdAt))
+            .fontSize(11)
+            .fontColor(MUTED)
+            .maxLines(1)
+            .accessibilityText(`消息时间：${messageTime(this.item.createdAt)}`)
+        }.width('100%')
         if (this.item.role === 'assistant') {
           MarkdownText({ text: this.item.text })
         } else if (this.item.text) {

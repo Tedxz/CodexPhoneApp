@@ -599,7 +599,14 @@ test('an active writer falls back to read-only history with pagination and no jo
   assert.equal(refreshed.readOnly, true);
   assert.equal(refreshed.items.at(-1)?.id, 'item-65');
   assert.equal(requests(f.socket, 'thread/resume').length, 1);
-  assert.equal(requests(f.socket, 'thread/items/list').length, 3);
+  assert.equal(
+    requests(f.socket, 'thread/items/list').filter((m) => m.params.limit === 60).length,
+    3,
+  );
+  assert.equal(
+    requests(f.socket, 'thread/items/list').filter((m) => m.params.limit === 100).length,
+    1,
+  );
   assert.equal(requests(f.socket, 'thread/items/list')[1].params.cursor, 'older-persisted-items');
   assert.ok(requests(f.socket, 'thread/read').every((message) => !message.params.includeTurns));
 });
@@ -1083,6 +1090,476 @@ test('unrelated turn-list errors and incomplete full reads never become empty su
   assert.equal(requests(f.socket, 'thread/read').filter((m) => m.params.includeTurns).length, 0);
   exact = true;
   await assert.rejects(f.adapter.snapshot('thread-1'), { code: 'INCOMPLETE_HISTORY' });
+});
+
+test('paginated context finds the nearest steering message and caches only exact item anchors', async (t) => {
+  const assistant = (id: string) => ({
+    turnId: 'same-turn',
+    item: { id, type: 'agentMessage', text: id },
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      const cursor = message.params.cursor;
+      if (cursor === 'older')
+        socket.reply(message, {
+          data: [
+            assistant('scanned-answer'),
+            {
+              turnId: 'same-turn',
+              startedAtMs: 1_800_000_003_000,
+              item: {
+                id: 'steering-user',
+                type: 'userMessage',
+                content: [{ type: 'text', text: 'Follow this later instruction' }],
+              },
+            },
+            assistant('original-answer'),
+            {
+              turnId: 'same-turn',
+              item: { id: 'original-user', type: 'userMessage', content: [] },
+            },
+          ],
+          nextCursor: null,
+        });
+      else
+        socket.reply(message, {
+          data: [assistant(cursor === 'scanned' ? 'scanned-answer' : cursor || 'latest-answer')],
+          nextCursor: cursor === 'unrelated' ? null : 'older',
+        });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.contextUser?.id, 'steering-user');
+  assert.equal(snapshot.contextUser?.createdAt, 1_800_000_003_000);
+  assert.deepEqual(
+    snapshot.items.map((item) => item.id),
+    ['latest-answer'],
+  );
+  assert.equal(snapshot.nextCursor, 'older');
+  assert.equal((await f.adapter.snapshot('thread-1')).contextUser?.id, 'steering-user');
+  assert.equal((await f.adapter.snapshot('thread-1', 'scanned')).contextUser?.id, 'steering-user');
+  assert.equal((await f.adapter.snapshot('thread-1', 'unrelated')).contextUser, undefined);
+  assert.equal(
+    requests(f.socket, 'thread/items/list').filter((m) => m.params.limit === 100).length,
+    1,
+  );
+});
+
+test('context lookup is bounded, omits unproven context and retries after reconnect', async (t) => {
+  let scanned = 0;
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      const id = message.params.cursor ? `older-${++scanned}` : 'latest';
+      socket.reply(message, {
+        data: [{ turnId: 'turn-0', item: { id, type: 'agentMessage', text: id } }],
+        nextCursor: `cursor-${scanned}`,
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const first = await f.adapter.snapshot('thread-1');
+  assert.equal(first.contextUser, undefined);
+  assert.equal(first.items.length, 1);
+  assert.equal(scanned, 16);
+  await f.adapter.snapshot('thread-1');
+  assert.equal(scanned, 16);
+  f.socket.terminate();
+  await f.adapter.connect();
+  await f.adapter.snapshot('thread-1');
+  assert.equal(scanned, 32);
+});
+
+test('context timeout preserves usable history and does not immediately repeat a failed scan', async (t) => {
+  const f = fixture(t, {
+    timeout: 25,
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      if (!message.params.cursor)
+        socket.reply(message, {
+          data: [
+            {
+              turnId: 'turn-0',
+              item: { id: 'latest', type: 'agentMessage', text: 'visible answer' },
+            },
+          ],
+          nextCursor: 'unresponsive-older-page',
+        });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const started = Date.now();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(snapshot.items[0]?.text, 'visible answer');
+  assert.equal(snapshot.contextUser, undefined);
+  await f.adapter.snapshot('thread-1');
+  assert.equal(requests(f.socket, 'thread/items/list').filter((m) => m.params.cursor).length, 1);
+});
+
+test('disconnect during optional context lookup cannot publish a stale-generation snapshot', async (t) => {
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      if (message.params.cursor) reached();
+      else
+        socket.reply(message, {
+          data: [
+            { turnId: 'turn-0', item: { id: 'latest', type: 'agentMessage', text: 'old data' } },
+          ],
+          nextCursor: 'older',
+        });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = assert.rejects(f.adapter.snapshot('thread-1'), { code: 'DISCONNECTED' });
+  await waiting;
+  f.socket.terminate();
+  await snapshot;
+});
+
+test('advancing history anchors stop context scans at an overlapping proven predecessor', async (t) => {
+  let advanced = false,
+    steered = false,
+    scans = 0;
+  const entry = (id: string) => ({
+    turnId: 'turn-0',
+    item: { id, type: 'agentMessage', text: 'answer' },
+  });
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      if (!message.params.cursor) {
+        socket.reply(message, {
+          data: [
+            entry(steered ? 'steered-anchor' : advanced ? 'advanced-anchor' : 'initial-anchor'),
+          ],
+          nextCursor: advanced ? 'overlap' : 'cold-1',
+        });
+        return true;
+      }
+      scans++;
+      const cursor = message.params.cursor;
+      socket.reply(message, {
+        data:
+          cursor === 'cold-2'
+            ? [{ turnId: 'turn-0', item: { id: 'prior-user', type: 'userMessage', content: [] } }]
+            : [
+                ...(steered
+                  ? [
+                      {
+                        turnId: 'turn-0',
+                        item: { id: 'new-user', type: 'userMessage', content: [] },
+                      },
+                    ]
+                  : []),
+                entry('cached-answer'),
+              ],
+        nextCursor: cursor === 'cold-2' ? null : 'cold-2',
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  assert.equal((await f.adapter.snapshot('thread-1')).contextUser?.id, 'prior-user');
+  assert.equal(scans, 2);
+  advanced = true;
+  assert.equal((await f.adapter.snapshot('thread-1')).contextUser?.id, 'prior-user');
+  assert.equal(scans, 3);
+  await f.adapter.snapshot('thread-1');
+  assert.equal(scans, 3);
+  steered = true;
+  assert.equal((await f.adapter.snapshot('thread-1')).contextUser?.id, 'new-user');
+  assert.equal(scans, 4);
+});
+
+test('oversized context pages are discarded without losing the main history page', async (t) => {
+  let scans = 0;
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      if (message.params.cursor) scans++;
+      socket.reply(message, {
+        data: [
+          {
+            turnId: 'turn-0',
+            item: {
+              id: message.params.cursor ? 'large-output' : 'latest',
+              type: 'agentMessage',
+              text: message.params.cursor ? 'x'.repeat(8 * 1024 * 1024) : 'visible',
+            },
+          },
+        ],
+        nextCursor: 'older',
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.contextUser, undefined);
+  assert.equal(snapshot.items[0]?.text, 'visible');
+  assert.equal(scans, 1);
+});
+
+test('context lookup also stops at its total elapsed-time budget between successful pages', async (t) => {
+  let now = 1_800_000_000_000,
+    scanned = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      if (message.params.cursor) {
+        scanned++;
+        now += 1100;
+      }
+      socket.reply(message, {
+        data: [
+          {
+            turnId: 'turn-0',
+            item: { id: `item-${scanned}`, type: 'agentMessage', text: 'answer' },
+          },
+        ],
+        nextCursor: `cursor-${scanned}`,
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  assert.equal((await f.adapter.snapshot('thread-1')).contextUser, undefined);
+  assert.equal(scanned, 3);
+});
+
+test('full-read compatibility derives preceding context locally without replacing paginated items', async (t) => {
+  const items = Array.from({ length: 70 }, (_, i) =>
+    i === 0 || i === 5
+      ? { id: `user-${i}`, type: 'userMessage', content: [{ type: 'text', text: `question ${i}` }] }
+      : { id: `answer-${i}`, type: 'agentMessage', text: `answer ${i}` },
+  );
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method === 'thread/items/list') {
+        socket.push({ id: message.id, error: { code: -32601, message: 'not supported' } });
+        return true;
+      }
+      if (message.method === 'thread/turns/list') {
+        socket.push({
+          id: message.id,
+          error: { code: -32601, message: 'list_turns is not supported yet' },
+        });
+        return true;
+      }
+      return false;
+    },
+  });
+  f.state.thread.turns = [{ id: 'turn-0', status: 'completed', itemsView: 'full', items }];
+  await f.adapter.connect();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.items.length, 60);
+  assert.equal(snapshot.items[0]?.id, 'answer-10');
+  assert.equal(snapshot.contextUser?.id, 'user-5');
+  assert.equal(snapshot.contextUser?.createdAt, undefined);
+  assert.equal(requests(f.socket, 'thread/items/list').length, 1);
+  const older = await f.adapter.snapshot('thread-1', snapshot.nextCursor!);
+  assert.equal(older.items[0]?.id, 'user-0');
+  assert.equal(older.contextUser, undefined);
+});
+
+test('item pages expose recorded start times in milliseconds and omit unknown or malformed times', async (t) => {
+  const invalid = [undefined, null, '1800000000000', -1, 1.5, 8_640_000_000_000_001, {}, []];
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      const data = message.params.cursor
+        ? [
+            {
+              turnId: 'older-turn',
+              startedAtMs: 1_799_999_000_000,
+              item: { id: 'older-user', type: 'userMessage', content: [] },
+            },
+          ]
+        : [
+            ...invalid.map((startedAtMs, index) => ({
+              turnId: 'turn-0',
+              startedAtMs,
+              completedAtMs: 1_800_000_050_000,
+              item: {
+                id: `unknown-${index}`,
+                type: 'agentMessage',
+                text: 'unknown start time',
+                createdAt: 1_800_000_000,
+              },
+            })),
+            {
+              turnId: 'turn-0',
+              startedAtMs: 1_800_000_002_123,
+              completedAtMs: 1_800_000_050_000,
+              item: { id: 'assistant', type: 'agentMessage', text: 'answer' },
+            },
+            {
+              turnId: 'turn-0',
+              startedAtMs: 1_800_000_000_123,
+              item: { id: 'user', type: 'userMessage', content: [] },
+            },
+          ];
+      socket.reply(message, { data, nextCursor: message.params.cursor ? null : 'older' });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.items.find((item) => item.id === 'user')?.createdAt, 1_800_000_000_123);
+  assert.equal(
+    snapshot.items.find((item) => item.id === 'assistant')?.createdAt,
+    1_800_000_002_123,
+  );
+  for (const item of snapshot.items.filter((item) => item.id.startsWith('unknown-')))
+    assert.equal('createdAt' in item, false, item.id);
+  const older = await f.adapter.snapshot('thread-1', snapshot.nextCursor!);
+  assert.equal(older.items[0]?.createdAt, 1_799_999_000_000);
+});
+
+test('legacy turn history does not use thread or turn timestamps as message times', async (t) => {
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method === 'thread/items/list') {
+        socket.push({ id: message.id, error: { code: -32601, message: 'not supported' } });
+        return true;
+      }
+      if (message.method === 'thread/turns/list') {
+        socket.reply(message, {
+          data: [
+            {
+              id: 'legacy-turn',
+              status: 'completed',
+              itemsView: 'full',
+              startedAt: 1_800_000_000,
+              completedAt: 1_800_000_060,
+              items: [
+                { id: 'legacy-user', type: 'userMessage', content: [] },
+                { id: 'legacy-answer', type: 'agentMessage', text: 'legacy answer' },
+              ],
+            },
+          ],
+          nextCursor: null,
+        });
+        return true;
+      }
+      return false;
+    },
+  });
+  await f.adapter.connect();
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.items.length, 2);
+  assert.ok(snapshot.items.every((item) => !('createdAt' in item)));
+});
+
+test('live start timestamps survive deltas, completion, untimed history and reconnect', async (t) => {
+  const f = fixture(t);
+  await f.adapter.connect();
+  await f.adapter.subscribe('thread-1');
+  f.socket.push({
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-0',
+      startedAtMs: 1_800_000_001_234,
+      item: { id: 'assistant-0', type: 'agentMessage', text: '' },
+    },
+  });
+  f.socket.push({
+    method: 'item/agentMessage/delta',
+    params: { threadId: 'thread-1', turnId: 'turn-0', itemId: 'assistant-0', delta: 'answer' },
+  });
+  f.socket.push({
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-0',
+      completedAtMs: 1_800_000_099_999,
+      item: { id: 'assistant-0', type: 'agentMessage', text: 'answer' },
+    },
+  });
+  const updates = f.events.filter(
+    (event) => event.type === 'item.updated' && event.item.id === 'assistant-0',
+  );
+  assert.equal(updates.length, 2);
+  assert.ok(
+    updates.every(
+      (event) => event.type === 'item.updated' && event.item.createdAt === 1_800_000_001_234,
+    ),
+  );
+  for (let read = 0; read < 2; read++) {
+    const snapshot = await f.adapter.snapshot('thread-1');
+    assert.equal(
+      snapshot.items.find((item) => item.id === 'assistant-0')?.createdAt,
+      1_800_000_001_234,
+    );
+  }
+  f.socket.terminate();
+  await f.adapter.connect();
+  const reconnected = await f.adapter.snapshot('thread-1');
+  assert.equal(
+    reconnected.items.find((item) => item.id === 'assistant-0')?.createdAt,
+    1_800_000_001_234,
+  );
+  // The timestamp cache is scoped to the thread, turn and item, not the item ID alone.
+  const other = await f.adapter.snapshot('thread-2');
+  assert.ok(other.items.every((item) => !('createdAt' in item)));
+});
+
+test('persisted timestamps enrich a newer live overlay without replacing its text', async (t) => {
+  const f = fixture(t, {
+    handler(message, socket) {
+      if (message.method !== 'thread/items/list') return false;
+      socket.reply(message, {
+        data: [
+          {
+            turnId: 'turn-0',
+            startedAtMs: 1_800_000_000_789,
+            item: { id: 'assistant-0', type: 'agentMessage', text: 'answer' },
+          },
+        ],
+        nextCursor: null,
+      });
+      return true;
+    },
+  });
+  await f.adapter.connect();
+  f.socket.push({
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-0',
+      startedAtMs: 'invalid',
+      item: { id: 'assistant-0', type: 'agentMessage', text: 'answer newer live content' },
+    },
+  });
+  const snapshot = await f.adapter.snapshot('thread-1');
+  assert.equal(snapshot.items[0]?.text, 'answer newer live content');
+  assert.equal(snapshot.items[0]?.createdAt, 1_800_000_000_789);
+  f.socket.push({
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-0',
+      completedAtMs: 1_800_000_001_000,
+      item: { id: 'completion-only', type: 'agentMessage', text: 'start was not observed' },
+    },
+  });
+  const completion = f.events.at(-1);
+  assert.equal(completion?.type, 'item.updated');
+  if (completion?.type === 'item.updated') assert.equal('createdAt' in completion.item, false);
 });
 
 test('live notifications normalize stream deltas, tool completion and authoritative turn state', async (t) => {

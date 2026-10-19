@@ -5,6 +5,7 @@ import type {
   ThreadSnapshot,
   ThreadSummary,
 } from '../shared/protocol';
+import { validMessageTime } from './message-time';
 
 export function mergeItems(
   old: ConversationItem[],
@@ -12,7 +13,15 @@ export function mergeItems(
   prepend = false,
 ): ConversationItem[] {
   const entries = new Map(old.map((item) => [item.id, item]));
-  for (const item of incoming) entries.set(item.id, item);
+  for (const item of incoming) {
+    const previous = entries.get(item.id);
+    entries.set(
+      item.id,
+      !validMessageTime(item.createdAt) && validMessageTime(previous?.createdAt)
+        ? { ...item, createdAt: previous.createdAt }
+        : item,
+    );
+  }
   const order = prepend ? [...incoming, ...old] : [...old, ...incoming];
   // A gateway restart can lose an unpersisted tool item while the browser
   // retains it. Its parent turn outcome still settles that cached item.
@@ -109,12 +118,21 @@ export class SnapshotTracker {
     const preservedIds = new Set(
       sameThread?.items.filter((item) => !incomingIds.has(item.id)).map((item) => item.id),
     );
+    const items = mergeItems(sameThread?.items ?? [], incoming.items, prepend);
+    // The fallback describes the first loaded item, so a newer page must not
+    // replace the context retained for older messages already on screen.
+    const contextUser =
+      incoming.items.length && items[0]?.id === incoming.items[0].id
+        ? (incoming.contextUser ??
+          (sameThread?.items[0]?.id === incoming.items[0].id ? sameThread.contextUser : undefined))
+        : sameThread?.contextUser;
     let result: ThreadSnapshot = {
       ...incoming,
+      contextUser,
       // History pages can arrive after an explicit access retry. Only a fresh
       // subscription may change whether the current conversation is writable.
       ...(prepend && sameThread ? { readOnly: sameThread.readOnly } : {}),
-      items: mergeItems(sameThread?.items ?? [], incoming.items, prepend),
+      items,
     };
     if (!cursor) return result;
     for (const envelope of this.events) {

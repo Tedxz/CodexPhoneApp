@@ -8,6 +8,7 @@ import {
   safeImageUrl,
 } from '../web/state.js';
 import type { EventEnvelope, GatewayEvent, ThreadSnapshot } from '../shared/protocol.js';
+import { formatMessageTime } from '../web/message-time.js';
 const snapshot = (text = 'abc', seq = 3): ThreadSnapshot => ({
   thread: { id: 't', title: 'Test', preview: '', cwd: '/p', status: 'idle', updatedAt: 1 },
   items: [{ id: 'a', turnId: 'turn', type: 'agentMessage', role: 'assistant', text }],
@@ -27,6 +28,118 @@ const delta = (text: string, id = 'a'): GatewayEvent => ({
   itemId: id,
   turnId: 'turn',
   delta: text,
+});
+
+test('message timestamps distinguish today, another day and another year without inventing missing times', () => {
+  const now = new Date(2026, 9, 19, 16, 30).getTime();
+  assert.equal(formatMessageTime(new Date(2026, 9, 19, 9, 5).getTime(), now), '09:05');
+  assert.equal(formatMessageTime(new Date(2026, 9, 18, 9, 5).getTime(), now), '10/18 09:05');
+  assert.equal(formatMessageTime(new Date(2025, 9, 18, 9, 5).getTime(), now), '2025/10/18 09:05');
+  for (const missing of [undefined, 0, -1, Number.NaN, Infinity, 1e20])
+    assert.equal(formatMessageTime(missing, now), '时间未知');
+});
+
+test('message time survives deltas, timestamp-less updates, refresh and older pages', () => {
+  const createdAt = new Date(2026, 9, 19, 9, 5).getTime();
+  const original = snapshot();
+  original.items[0].createdAt = createdAt;
+  let current = applyEvent(original, delta(' more'))!;
+  assert.equal(current.items[0].createdAt, createdAt);
+  current = applyEvent(current, {
+    type: 'item.updated',
+    threadId: 't',
+    item: snapshot('replacement').items[0],
+  })!;
+  assert.equal(current.items[0].createdAt, createdAt);
+  const tracker = new SnapshotTracker();
+  current = tracker.reconcile(current, snapshot('refresh'));
+  assert.equal(current.items[0].createdAt, createdAt);
+  current = tracker.reconcile(current, snapshot('older'), true);
+  assert.equal(current.items[0].createdAt, createdAt);
+  assert.equal(
+    mergeItems(current.items, [{ ...current.items[0], createdAt: Number.NaN }])[0].createdAt,
+    createdAt,
+  );
+  assert.equal(
+    mergeItems(current.items, [{ ...current.items[0], createdAt: createdAt + 1000 }])[0].createdAt,
+    createdAt + 1000,
+  );
+  assert.equal(applyEvent(snapshot(), delta(' delta'))!.items[0].createdAt, undefined);
+});
+
+test('sticky context stays with the first merged history page across refresh, pagination and thread switches', () => {
+  const tracker = new SnapshotTracker();
+  const prompt = (id: string) => ({
+    id,
+    turnId: id,
+    type: 'userMessage',
+    role: 'user' as const,
+    text: id,
+  });
+  const current = snapshot();
+  current.contextUser = prompt('first-page-prompt');
+  const refresh = snapshot();
+  refresh.items = [{ ...refresh.items[0], id: 'new-answer' }];
+  refresh.contextUser = prompt('newer-page-prompt');
+  assert.equal(tracker.reconcile(current, refresh).contextUser?.id, 'first-page-prompt');
+  const older = snapshot();
+  older.items = [{ ...older.items[0], id: 'old-answer' }];
+  older.contextUser = prompt('older-page-prompt');
+  const withOlder = tracker.reconcile(current, older, true);
+  assert.equal(withOlder.items[0].id, 'old-answer');
+  assert.equal(withOlder.contextUser?.id, 'older-page-prompt');
+  assert.equal(tracker.reconcile(withOlder, refresh).contextUser?.id, 'older-page-prompt');
+  const noContext = { ...older, contextUser: undefined };
+  assert.equal(tracker.reconcile(current, noContext, true).contextUser, undefined);
+  const emptyPage = { ...older, items: [] };
+  assert.equal(tracker.reconcile(current, emptyPage, true).contextUser?.id, 'first-page-prompt');
+  assert.equal(
+    tracker.reconcile({ ...current, items: [] }, refresh).contextUser?.id,
+    'newer-page-prompt',
+  );
+  assert.equal(tracker.reconcile(null, refresh).contextUser?.id, 'newer-page-prompt');
+  const otherThread = {
+    ...refresh,
+    thread: { ...refresh.thread, id: 'another-thread' },
+    contextUser: undefined,
+  };
+  assert.equal(tracker.reconcile(current, otherThread).contextUser, undefined);
+});
+
+test('refreshing the same first item can recover unresolved context and enrich its timestamp', () => {
+  const tracker = new SnapshotTracker();
+  const unresolved = snapshot();
+  const resolved = snapshot();
+  resolved.contextUser = {
+    id: 'context-user',
+    turnId: 'turn',
+    type: 'userMessage',
+    role: 'user',
+    text: 'Prompt found after a later scan',
+  };
+  const recovered = tracker.reconcile(unresolved, resolved);
+  assert.equal(recovered.contextUser?.id, 'context-user');
+  const createdAt = new Date(2026, 9, 19, 9, 5).getTime();
+  const enriched = { ...resolved, contextUser: { ...resolved.contextUser, createdAt } };
+  assert.equal(tracker.reconcile(recovered, enriched).contextUser?.createdAt, createdAt);
+});
+
+test('a temporarily omitted context preserves known context only when the first item stays the same', () => {
+  const tracker = new SnapshotTracker();
+  const current = snapshot();
+  current.contextUser = {
+    id: 'known-prompt',
+    turnId: 'turn',
+    type: 'userMessage',
+    role: 'user',
+    text: 'Already resolved prompt',
+    createdAt: new Date(2026, 9, 19, 9, 5).getTime(),
+  };
+  const omitted = snapshot('refreshed message');
+  assert.deepEqual(tracker.reconcile(current, omitted).contextUser, current.contextUser);
+  assert.deepEqual(tracker.reconcile(current, omitted, true).contextUser, current.contextUser);
+  const older = { ...omitted, items: [{ ...omitted.items[0], id: 'older-first-item' }] };
+  assert.equal(tracker.reconcile(current, older, true).contextUser, undefined);
 });
 
 test('watermark reconciliation replays only events newer than authoritative incoming snapshot', () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type {
   Bootstrap,
+  ConversationItem,
   Device,
   ModelOption,
   SessionSettings,
@@ -27,7 +28,7 @@ import {
   targetPath,
   type TargetDirectory,
 } from './targets';
-import { Icon, Message, ModelControls, RequestCard } from './components';
+import { Icon, Message, MessageTime, ModelControls, PromptDialog, RequestCard } from './components';
 import { ThreadBrowser } from './ThreadBrowser';
 import { updateVisibleThreads } from './thread-browser';
 import {
@@ -229,6 +230,9 @@ function TargetWorkspace({
   const [listBusy, setListBusy] = useState(false);
   const [listError, setListError] = useState('');
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const [contextPromptId, setContextPromptId] = useState<string | null>(null);
+  const [contextPromptTop, setContextPromptTop] = useState(0);
+  const [expandedPrompt, setExpandedPrompt] = useState<ConversationItem | null>(null);
   const [mobileChat, setMobileChat] = useState(false);
   const [loading, setLoading] = useState(false);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -274,6 +278,30 @@ function TargetWorkspace({
   const browserQueryRef = useRef(browserQuery);
   const loadListVersion = useRef(0);
   const timeline = useRef<HTMLDivElement>(null);
+  const updateContextPrompt = useCallback(() => {
+    const container = timeline.current;
+    let promptId: string | null = null;
+    if (container) {
+      const top = container.getBoundingClientRect().top;
+      const history = container.querySelector('.history-button');
+      setContextPromptTop(
+        Math.max(0, history ? history.getBoundingClientRect().bottom - top + 6 : 0),
+      );
+      for (const message of container.querySelectorAll<HTMLElement>('.message.user')) {
+        if (message.getBoundingClientRect().top > top + 1) break;
+        promptId = message.dataset.messageId || null;
+      }
+      const current = snapshotRef.current;
+      if (
+        !promptId &&
+        current?.items.length &&
+        current.contextUser?.role === 'user' &&
+        !current.items.some((item) => item.id === current.contextUser?.id)
+      )
+        promptId = current.contextUser.id;
+    }
+    setContextPromptId(promptId);
+  }, []);
   const nearBottom = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
   const ready = live && !!boot?.connection.connected;
@@ -282,6 +310,9 @@ function TargetWorkspace({
     ? models.find((model) => model.id === selectedModelId)?.label || selectedModelId
     : '沿用电脑';
   const selectedEffortLabel = settings.effort || 'default';
+  const contextPrompt =
+    snapshot?.items.find((item) => item.id === contextPromptId && item.role === 'user') ||
+    (snapshot?.contextUser?.id === contextPromptId ? snapshot.contextUser : undefined);
   const setFailure = (e: unknown) => {
     if (!(e instanceof StaleTargetRequest)) setError(describeError(e));
   };
@@ -573,6 +604,7 @@ function TargetWorkspace({
   ]);
   useEffect(() => {
     setModelControlsOpen(false);
+    setExpandedPrompt(null);
   }, [snapshot?.thread.id]);
   useEffect(() => {
     if (!ready || snapshot?.readOnly || snapshot?.thread.status === 'active' || sending)
@@ -581,7 +613,18 @@ function TargetWorkspace({
   useEffect(() => {
     if (nearBottom.current && timeline.current)
       timeline.current.scrollTop = timeline.current.scrollHeight;
-  }, [snapshot?.items, snapshot?.pendingRequests]);
+    updateContextPrompt();
+  }, [snapshot?.items, snapshot?.pendingRequests, snapshot?.contextUser, updateContextPrompt]);
+  useEffect(() => {
+    const container = timeline.current;
+    if (!container) return;
+    const observer = new ResizeObserver(updateContextPrompt);
+    observer.observe(container);
+    const content = container.firstElementChild;
+    if (content) observer.observe(content);
+    updateContextPrompt();
+    return () => observer.disconnect();
+  }, [snapshot?.thread.id, loading, mobileChat, updateContextPrompt]);
 
   useEffect(() => {
     if (!modal) return;
@@ -620,6 +663,7 @@ function TargetWorkspace({
     restoringThread.current = null;
     setRestoringEdit(false);
     snapshotRequestVersion.current++;
+    setContextPromptId(null);
     selected.current = id;
     commitSnapshot(null);
     setLoading(true);
@@ -1146,56 +1190,101 @@ function TargetWorkspace({
                 </button>
               </div>
             )}
-            <div
-              className="timeline"
-              ref={timeline}
-              onScroll={() => {
-                const el = timeline.current;
-                if (el) nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-              }}
-            >
-              {snapshot.nextCursor && (
-                <button
-                  className="secondary history-button"
-                  disabled={olderBusy}
-                  onClick={() => void older()}
+            <div className="timeline-region">
+              <div
+                className="timeline"
+                ref={timeline}
+                onScroll={() => {
+                  const el = timeline.current;
+                  if (el)
+                    nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+                  updateContextPrompt();
+                }}
+              >
+                <div className="timeline-content">
+                  {snapshot.nextCursor && (
+                    <button
+                      className="secondary history-button"
+                      disabled={olderBusy}
+                      onClick={() => void older()}
+                    >
+                      {olderBusy ? '正在加载…' : '查看更早的消息'}
+                    </button>
+                  )}
+                  {snapshot.items.map((item) => (
+                    <Message item={item} targetId={targetId} key={item.id} />
+                  ))}
+                  {!snapshot.items.length && (
+                    <div className="empty-state compact">
+                      <h2>{snapshot.readOnly ? '暂无历史消息' : '一切从你的想法开始'}</h2>
+                      <p>
+                        {snapshot.readOnly
+                          ? '刷新可读取其他客户端的新消息。'
+                          : '描述任务，或附上一张截图。'}
+                      </p>
+                    </div>
+                  )}
+                  {snapshot.warning && <p className="notice">{snapshot.warning}</p>}
+                  {snapshot.pendingRequests.map((request) => (
+                    <RequestCard
+                      key={request.id}
+                      request={request}
+                      connected={ready && !snapshot.readOnly}
+                      answer={async (requestId, answer) => {
+                        if (snapshotRef.current?.readOnly) return;
+                        const revision = authRevision.current;
+                        await client.current!.command('request.respond', { requestId, ...answer });
+                        if (revision !== authRevision.current) return;
+                        setNotice('回答已发送，等待电脑更新执行状态');
+                        await syncSnapshot();
+                      }}
+                    />
+                  ))}
+                  {snapshot.thread.status === 'active' && (
+                    <div className="working-indicator" role="status">
+                      <span className="connection-dot" /> Codex 正在处理
+                    </div>
+                  )}
+                </div>
+              </div>
+              {contextPrompt && (
+                <aside
+                  className="context-prompt"
+                  style={{ top: contextPromptTop }}
+                  aria-label="当前阅读位置的提问"
                 >
-                  {olderBusy ? '正在加载…' : '查看更早的消息'}
-                </button>
-              )}
-              {snapshot.items.map((item) => (
-                <Message item={item} targetId={targetId} key={item.id} />
-              ))}
-              {!snapshot.items.length && (
-                <div className="empty-state compact">
-                  <h2>{snapshot.readOnly ? '暂无历史消息' : '一切从你的想法开始'}</h2>
+                  <div className="context-prompt-meta">
+                    <span>当前提问</span>
+                    <MessageTime createdAt={contextPrompt.createdAt} />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const container = timeline.current;
+                        const original =
+                          container &&
+                          [...container.querySelectorAll<HTMLElement>('.message.user')].find(
+                            (message) => message.dataset.messageId === contextPrompt.id,
+                          );
+                        if (!container || !original) {
+                          setExpandedPrompt(contextPrompt);
+                          return;
+                        }
+                        nearBottom.current = false;
+                        container.scrollTop +=
+                          original.getBoundingClientRect().top -
+                          container.getBoundingClientRect().top -
+                          12;
+                        updateContextPrompt();
+                        original.focus({ preventScroll: true });
+                      }}
+                    >
+                      查看原文
+                    </button>
+                  </div>
                   <p>
-                    {snapshot.readOnly
-                      ? '刷新可读取其他客户端的新消息。'
-                      : '描述任务，或附上一张截图。'}
+                    {contextPrompt.text || (contextPrompt.images?.length ? '图片提问' : '空白提问')}
                   </p>
-                </div>
-              )}
-              {snapshot.warning && <p className="notice">{snapshot.warning}</p>}
-              {snapshot.pendingRequests.map((request) => (
-                <RequestCard
-                  key={request.id}
-                  request={request}
-                  connected={ready && !snapshot.readOnly}
-                  answer={async (requestId, answer) => {
-                    if (snapshotRef.current?.readOnly) return;
-                    const revision = authRevision.current;
-                    await client.current!.command('request.respond', { requestId, ...answer });
-                    if (revision !== authRevision.current) return;
-                    setNotice('回答已发送，等待电脑更新执行状态');
-                    await syncSnapshot();
-                  }}
-                />
-              ))}
-              {snapshot.thread.status === 'active' && (
-                <div className="working-indicator" role="status">
-                  <span className="connection-dot" /> Codex 正在处理
-                </div>
+                </aside>
               )}
             </div>
             <form className="composer" onSubmit={send}>
@@ -1367,6 +1456,13 @@ function TargetWorkspace({
           </>
         )}
       </main>
+      {expandedPrompt && (
+        <PromptDialog
+          item={expandedPrompt}
+          targetId={targetId}
+          onClose={() => setExpandedPrompt(null)}
+        />
+      )}
       {modal && (
         <div
           className="modal-backdrop"

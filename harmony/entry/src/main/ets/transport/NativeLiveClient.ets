@@ -108,10 +108,14 @@ export class NativeLiveClient {
       this.pending.set(id, new PendingCommand(resolve, reject, timeout));
       socket.send(payload).catch(() => {
         const command = this.pending.get(id);
-        if (!command) return;
-        clearTimeout(command.timeout);
-        this.pending.delete(id);
-        command.reject(new Error('发送时连接中断，请核对会话确认操作结果。'));
+        if (command) {
+          clearTimeout(command.timeout);
+          this.pending.delete(id);
+          command.reject(new Error('发送时连接中断，请核对会话确认操作结果。'));
+        }
+        // Some native send failures do not emit a separate close/error event.
+        // Reconnect and resync, but never replay this uncertain command.
+        this.disconnected(socket, 1006);
       });
     });
   }

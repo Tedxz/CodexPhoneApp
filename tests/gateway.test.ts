@@ -12,6 +12,7 @@ import type { Config } from '../server/config.js';
 import { WebSocket } from 'ws';
 import type { Duplex } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { ConversationItem } from '../shared/protocol.js';
 
 class FakeCodex extends EventEmitter {
   connection = { connected: true, message: 'Connected', sharedBackend: true };
@@ -19,6 +20,7 @@ class FakeCodex extends EventEmitter {
   calls = 0;
   subscriptions: { id: string; retryWrite: boolean }[] = [];
   readOnly = false;
+  contextUser?: ConversationItem;
   listOptions?: { cursor?: string; search?: string; cwd?: string };
   close() {}
   async listThreads(options: { cursor?: string; search?: string; cwd?: string }) {
@@ -44,9 +46,13 @@ class FakeCodex extends EventEmitter {
       thread: { id, title: 'test', cwd: '/project', preview: '', status: 'idle', updatedAt: 0 },
       ...(this.readOnly ? { readOnly: true } : {}),
       items: [],
+      ...(this.contextUser ? { contextUser: this.contextUser } : {}),
       pendingRequests: [],
       nextCursor: null,
     };
+  }
+  async snapshot(id: string) {
+    return this.subscribe(id);
   }
 }
 async function fixture(extraOrigins: string[] = []) {
@@ -114,6 +120,7 @@ async function fixture(extraOrigins: string[] = []) {
     return { status, headers, data, json: () => JSON.parse(data) };
   };
   return {
+    dir,
     gateway,
     codex,
     request,
@@ -231,6 +238,7 @@ function connectBrowser(
   f: Awaited<ReturnType<typeof fixture>>,
   cookie: string,
   origin = 'https://phone.example',
+  path = '/api/v1/ws',
 ) {
   const ws = new FakeBrowserSocket();
   f.gateway.wsServer.handleUpgrade = (req, _socket, _head, callback) =>
@@ -242,7 +250,7 @@ function connectBrowser(
     },
   } as unknown as Duplex;
   const request = {
-    url: '/api/v1/ws',
+    url: path,
     headers: { host: new URL(origin).host, origin, cookie },
   } as IncomingMessage;
   f.gateway.server.emit('upgrade', request, socket, Buffer.alloc(0));
@@ -277,6 +285,62 @@ test('read-only snapshots reach clients and write-access retry requires an expli
     assert.equal(recovered.result.readOnly, undefined);
     assert.deepEqual(f.codex.subscriptions[1], { id: 'busy-thread', retryWrite: true });
     ws.close();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('context messages keep timestamps and sanitize image paths for HTTP and both WebSocket namespaces', async () => {
+  const f = await fixture();
+  try {
+    const paired = f.gateway.auth.pair(f.gateway.auth.createPairing().token, 'Phone')!;
+    const cookie = 'codex_phone=' + paired.token;
+    const saved = await f.request('/api/v1/uploads', {
+      method: 'POST',
+      cookie,
+      csrf: true,
+      origin: 'https://phone.example',
+      contentType: 'image/png',
+      bytes: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJVkAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    });
+    assert.equal(saved.status, 201);
+    const id = saved.json().id;
+    f.codex.contextUser = {
+      id: 'earlier-user',
+      turnId: 'turn-0',
+      type: 'userMessage',
+      role: 'user',
+      text: 'Question with an image',
+      createdAt: 1_800_000_000_123,
+      images: [join(f.dir, 'uploads', `${id}.png`), '/private/unmanaged.png'],
+    };
+    for (const prefix of ['/api/v1', '/api/v1/targets/local']) {
+      const response = await f.request(`${prefix}/threads/thread-1`, { cookie });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.json().contextUser.images, [`${prefix}/uploads/${id}`]);
+      assert.equal(response.json().contextUser.createdAt, 1_800_000_000_123);
+      assert.ok(!response.data.includes('/private/'));
+      const ws = connectBrowser(f, cookie, 'https://phone.example', `${prefix}/ws`);
+      ws.emit(
+        'message',
+        Buffer.from(
+          JSON.stringify({
+            id: 'context-read',
+            method: 'thread.subscribe',
+            params: { threadId: 'thread-1' },
+          }),
+        ),
+      );
+      await delay(5);
+      const reply = ws.sent.find((message) => message.id === 'context-read');
+      assert.deepEqual(reply?.result.contextUser.images, [`${prefix}/uploads/${id}`]);
+      assert.equal(reply?.result.contextUser.createdAt, 1_800_000_000_123);
+      assert.ok(!JSON.stringify(reply).includes('/private/'));
+      ws.close();
+    }
   } finally {
     await f.cleanup();
   }

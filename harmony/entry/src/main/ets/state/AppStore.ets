@@ -500,13 +500,19 @@ export class AppStore {
       await this.identifyClient(api, boot, revision);
       if (revision !== this.authVersion) return;
       this.boot = boot;
+      if (!this.client) this.connectLive(api, revision);
+      else this.client.connect();
       if (!boot.connection.connected) { this.listBusy = false; return; }
+      if (this.screen === 'chat' && this.selected && this.live) await this.syncSnapshot();
+      if (revision !== this.authVersion) return;
+      // Chat recovery must not wait for unrelated directory/model requests.
+      // Those catalogs are refreshed on target entry and when returning to the list.
+      if (this.screen === 'chat') return;
       await this.loadList();
+      if (revision !== this.authVersion) return;
       const models = await api.models();
       if (revision !== this.authVersion) return;
       this.models = models.data;
-      if (this.selected && this.live) await this.syncSnapshot();
-      if (!this.client) this.connectLive(api, revision);
     } catch (caught) { if (revision === this.authVersion) await this.fail(caught as Error); }
   }
 
@@ -709,7 +715,7 @@ export class AppStore {
     } catch (caught) { if (selection === this.selectionVersion && revision === this.authVersion) await this.fail(caught as Error); }
     finally { if (selection === this.selectionVersion && revision === this.authVersion) this.loading = false; }
   }
-  backToThreads(): void { this.screen = 'threads'; }
+  backToThreads(): void { this.screen = 'threads'; void this.refresh(); }
   private async syncSnapshot(cursor?: string, retryWrite: boolean = false): Promise<void> {
     const id = this.selected;
     if (!id || !this.client) return;
@@ -961,7 +967,9 @@ export class AppStore {
     const context = this.context;
     if (!api || !context) return;
     const revision = this.authVersion;
-    for (const item of this.snapshot?.items || []) {
+    const items = this.snapshot?.items || [];
+    const contextUser = this.snapshot?.contextUser;
+    for (const item of contextUser ? [contextUser].concat(items) : items) {
       for (const path of item.images || []) {
         const key = this.draftKey(path);
         const pendingKey = `${revision}|${key}`;

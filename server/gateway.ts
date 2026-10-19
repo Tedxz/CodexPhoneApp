@@ -147,6 +147,9 @@ export function createGateway(
     return {
       ...snapshot,
       items: snapshot.items.map((item) => itemForBrowser(item, target, legacy)),
+      ...(snapshot.contextUser
+        ? { contextUser: itemForBrowser(snapshot.contextUser, target, legacy) }
+        : {}),
       eventCursor: { ...cursors.get(target.id)! },
     };
   }
@@ -463,6 +466,16 @@ export function createGateway(
                         url.replace('/api/v1/targets/local/uploads/', '/api/v1/uploads/'),
                       ),
                     })),
+                    ...((result as ThreadSnapshot).contextUser
+                      ? {
+                          contextUser: {
+                            ...(result as ThreadSnapshot).contextUser!,
+                            images: (result as ThreadSnapshot).contextUser!.images?.map((url) =>
+                              url.replace('/api/v1/targets/local/uploads/', '/api/v1/uploads/'),
+                            ),
+                          },
+                        }
+                      : {}),
                   }
                 : result;
             send(ws, { id, result: response });

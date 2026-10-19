@@ -28,6 +28,8 @@ export interface ConversationItem {
   type: string;
   role?: 'user' | 'assistant';
   text: string;
+  /** Recorded item start/send time in Unix milliseconds; absent when unknown. */
+  createdAt?: number;
   status?: string;
   images?: string[];
 }
@@ -55,6 +57,8 @@ export interface ThreadSnapshot {
   thread: ThreadSummary;
   readOnly?: boolean;
   items: ConversationItem[];
+  /** Nearest known user message before the first item, for paginated context. */
+  contextUser?: ConversationItem;
   nextCursor: string | null;
   pendingRequests: PendingRequest[];
   settings?: SessionSettings;

@@ -68,6 +68,10 @@ interface LiveRuntime {
   revision: number;
   confirmedThrough?: number;
 }
+interface ItemContext {
+  user?: ConversationItem;
+  retryAfter?: number;
+}
 const record = (v: unknown): ObjectValue =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as ObjectValue) : {};
 const array = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
@@ -84,6 +88,13 @@ const rpcKey = (id: RpcId): string => `${typeof id}:${id}`;
 const knownEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
 const readCursorPrefix = 'phone-read-v1:';
 const emptyCwdCursorPrefix = 'phone-empty-cwd-v1:';
+const itemTimestamp = (value: unknown): number | undefined =>
+  typeof value === 'number' &&
+  Number.isSafeInteger(value) &&
+  value >= 0 &&
+  value <= 8_640_000_000_000_000
+    ? value
+    : undefined;
 
 /** Shared-backend client: never launches an app-server or reads rollout files. */
 export class CodexAdapter extends EventEmitter {
@@ -102,6 +113,9 @@ export class CodexAdapter extends EventEmitter {
   private settings = new Map<string, SessionSettings>();
   private activeFlags = new Map<string, string[]>();
   private items = new Map<string, ConversationItem>();
+  private itemStartedAt = new Map<string, number>();
+  private itemContexts = new Map<string, ItemContext>();
+  private contextReads = new Map<string, Promise<ConversationItem | undefined>>();
   private liveItems = new Map<string, LiveItem>();
   private liveRuntime = new Map<string, LiveRuntime>();
   private terminalTurns = new Map<string, 'interrupted' | 'failed'>();
@@ -270,6 +284,8 @@ export class CodexAdapter extends EventEmitter {
     this.liveRuntime.clear();
     this.terminalTurns.clear();
     this.items.clear();
+    this.itemContexts.clear();
+    this.contextReads.clear();
     this.itemRevisions.clear();
     this.threadRevisions.clear();
     for (const pending of this.inflight.values()) {
@@ -317,23 +333,27 @@ export class CodexAdapter extends EventEmitter {
     params: unknown,
     mutation = false,
     initializing = false,
+    timeoutMs = this.timeout,
   ): Promise<any> {
     if (!this.socket || (!initializing && !this._connection.connected))
       return Promise.reject(new CodexError('DISCONNECTED', '电脑 Codex 未连接'));
     const generation = this.generation,
       id = `${generation}:${++this.sequence}`;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.inflight.delete(rpcKey(id));
-        reject(
-          new CodexError(
-            mutation ? 'OUTCOME_UNKNOWN' : 'TIMEOUT',
-            mutation
-              ? '操作等待超时，结果未知。请同步会话确认结果；系统不会自动重发。'
-              : `${method} 请求超时`,
-          ),
-        );
-      }, this.timeout);
+      const timer = setTimeout(
+        () => {
+          this.inflight.delete(rpcKey(id));
+          reject(
+            new CodexError(
+              mutation ? 'OUTCOME_UNKNOWN' : 'TIMEOUT',
+              mutation
+                ? '操作等待超时，结果未知。请同步会话确认结果；系统不会自动重发。'
+                : `${method} 请求超时`,
+            ),
+          );
+        },
+        Math.min(this.timeout, timeoutMs),
+      );
       this.inflight.set(rpcKey(id), { resolve, reject, timer, mutation });
       try {
         this.write({ id, method, params }, (error) => {
@@ -586,7 +606,8 @@ export class CodexAdapter extends EventEmitter {
     threadId: string,
     cursor: string | undefined,
   ): Promise<ThreadSnapshot> {
-    const revision = this.revision;
+    const revision = this.revision,
+      generation = this.generation;
     let readResult: PromiseSettledResult<unknown>,
       pageResult: PromiseSettledResult<unknown>,
       runtimeResult: PromiseSettledResult<unknown>;
@@ -637,6 +658,9 @@ export class CodexAdapter extends EventEmitter {
     };
     const page = historyResult(pageResult),
       runtime = historyResult(runtimeResult);
+    const contextUser = await this.contextUser(threadId, page);
+    if (generation !== this.generation)
+      throw new CodexError('DISCONNECTED', '读取会话时后端连接已变化，请重新同步');
     const latest = array(record(runtime).data).map(record)[0];
     if (latest) this.rememberTerminalTurn(threadId, str(latest.id), latest.status);
     const liveRuntime = this.liveRuntime.get(threadId);
@@ -668,7 +692,10 @@ export class CodexAdapter extends EventEmitter {
       .map((entry) => {
         const e = record(entry);
         this.rememberTerminalTurn(threadId, str(e.turnId), e.turnStatus);
-        const item = this.finishItem(threadId, this.item(record(e.item), str(e.turnId))),
+        const item = this.finishItem(
+            threadId,
+            this.item(record(e.item), str(e.turnId), e.startedAtMs),
+          ),
           key = `${threadId}:${item.id}`;
         const live = this.liveItems.get(key);
         if (live) {
@@ -738,6 +765,7 @@ export class CodexAdapter extends EventEmitter {
     return {
       thread: this.threads.get(threadId)!,
       items: items.map((item) => this.finishItem(threadId, item)),
+      ...(contextUser ? { contextUser } : {}),
       nextCursor:
         typeof record(page).nextCursor === 'string' ? (record(page).nextCursor as string) : null,
       pendingRequests,
@@ -766,6 +794,112 @@ export class CodexAdapter extends EventEmitter {
       JSON.stringify(history.images) === JSON.stringify(live.images)
     );
   }
+  private contextKey(threadId: string, itemId: string): string {
+    return JSON.stringify([threadId, itemId]);
+  }
+  private rememberContext(key: string, context: ItemContext): void {
+    this.itemContexts.delete(key);
+    this.itemContexts.set(key, context);
+    if (this.itemContexts.size > 8192)
+      this.itemContexts.delete(this.itemContexts.keys().next().value!);
+  }
+  private async contextUser(
+    threadId: string,
+    page: ObjectValue,
+  ): Promise<ConversationItem | undefined> {
+    const oldest = array(page.data).map(record).at(-1);
+    if (!oldest || record(oldest.item).type === 'userMessage') return undefined;
+    const itemId = str(record(oldest.item).id);
+    if (!itemId) return undefined;
+    const key = this.contextKey(threadId, itemId),
+      cached = this.itemContexts.get(key);
+    if (cached && (cached.retryAfter === undefined || cached.retryAfter > Date.now()))
+      return cached.user && this.finishItem(threadId, cached.user);
+    // Full-read fallback already has the earlier entries; do not fetch them again.
+    if ('contextEntry' in page) {
+      const entry = record(page.contextEntry),
+        user =
+          record(entry.item).type === 'userMessage'
+            ? this.finishItem(
+                threadId,
+                this.item(record(entry.item), str(entry.turnId), entry.startedAtMs),
+              )
+            : undefined;
+      this.rememberContext(key, { user });
+      return user;
+    }
+    if (typeof page.nextCursor !== 'string') {
+      this.rememberContext(key, {});
+      return undefined;
+    }
+    const existing = this.contextReads.get(key);
+    if (existing) return existing;
+    const generation = this.generation;
+    const pending = this.scanContext(threadId, oldest, page.nextCursor, generation).finally(() => {
+      if (this.contextReads.get(key) === pending) this.contextReads.delete(key);
+    });
+    this.contextReads.set(key, pending);
+    return pending;
+  }
+  private async scanContext(
+    threadId: string,
+    oldest: ObjectValue,
+    cursor: string,
+    generation: string,
+  ): Promise<ConversationItem | undefined> {
+    const deadline = Date.now() + 3000,
+      anchors = new Set([str(record(oldest.item).id)]),
+      cursors = new Set<string>();
+    let next: string | undefined = cursor,
+      bytes = 0;
+    try {
+      for (let pages = 0; next !== undefined && pages < 16 && Date.now() < deadline; pages++) {
+        if (cursors.has(next)) break;
+        cursors.add(next);
+        const page = await this.historyPage(threadId, next, deadline);
+        if (generation !== this.generation) return undefined;
+        bytes += Buffer.byteLength(JSON.stringify(page));
+        if (bytes > 8 * 1024 * 1024) break;
+        for (const value of array(page.data)) {
+          const entry = record(value),
+            raw = record(entry.item),
+            id = str(raw.id);
+          // Native cursors exclude their anchor. Repeated items make the
+          // predecessor ambiguous, so avoid assigning a misleading question.
+          if (!id || anchors.has(id)) throw new Error('Context pagination repeated an item');
+          if (raw.type === 'userMessage') {
+            const user = this.finishItem(
+              threadId,
+              this.item(raw, str(entry.turnId), entry.startedAtMs),
+            );
+            for (const anchor of anchors)
+              this.rememberContext(this.contextKey(threadId, anchor), { user });
+            return user;
+          }
+          const known = this.itemContexts.get(this.contextKey(threadId, id));
+          if (known && known.retryAfter === undefined) {
+            const user = known.user && this.finishItem(threadId, known.user);
+            for (const anchor of anchors)
+              this.rememberContext(this.contextKey(threadId, anchor), { user });
+            return user;
+          }
+          anchors.add(id);
+        }
+        next = typeof page.nextCursor === 'string' ? page.nextCursor : undefined;
+      }
+      if (next === undefined) {
+        for (const anchor of anchors) this.rememberContext(this.contextKey(threadId, anchor), {});
+        return undefined;
+      }
+    } catch {
+      // Context is optional. History remains usable when an older page fails.
+    }
+    if (generation === this.generation)
+      this.rememberContext(this.contextKey(threadId, str(record(oldest.item).id)), {
+        retryAfter: Date.now() + 30_000,
+      });
+    return undefined;
+  }
   private noteRuntime(threadId: string, state: ThreadSummary['status'], turnId?: string): void {
     this.liveRuntime.set(threadId, {
       status: state,
@@ -778,6 +912,17 @@ export class CodexAdapter extends EventEmitter {
       this.terminalTurns.set(`${threadId}:${turnId}`, turnStatus);
   }
   private finishItem(threadId: string, item: ConversationItem): ConversationItem {
+    // Start timestamps are immutable message metadata, not live text overlays.
+    // Completion events and legacy history may omit them, including on reconnect.
+    const key = `${threadId}:${item.turnId}:${item.id}`;
+    const createdAt = item.createdAt ?? this.itemStartedAt.get(key);
+    if (createdAt !== undefined) {
+      this.itemStartedAt.delete(key);
+      this.itemStartedAt.set(key, createdAt);
+      if (this.itemStartedAt.size > 8192)
+        this.itemStartedAt.delete(this.itemStartedAt.keys().next().value!);
+      if (item.createdAt === undefined) item = { ...item, createdAt };
+    }
     const terminal = this.terminalTurns.get(`${threadId}:${item.turnId}`);
     // A terminated parent cannot still have a running child. Preserve items
     // that already report their own completed/failed result and all output.
@@ -859,6 +1004,11 @@ export class CodexAdapter extends EventEmitter {
       first = page[0];
     return {
       data: page.reverse(),
+      contextEntry:
+        entries
+          .slice(0, start)
+          .reverse()
+          .find((entry) => record(entry.item).type === 'userMessage') ?? null,
       nextCursor:
         start > 0 && first
           ? readCursorPrefix +
@@ -868,18 +1018,33 @@ export class CodexAdapter extends EventEmitter {
           : null,
     };
   }
-  private async historyPage(threadId: string, cursor?: string): Promise<ObjectValue> {
+  private async historyPage(
+    threadId: string,
+    cursor?: string,
+    deadline?: number,
+  ): Promise<ObjectValue> {
+    const remaining = (): number => {
+      const timeout = deadline === undefined ? this.timeout : deadline - Date.now();
+      if (timeout <= 0) throw new CodexError('TIMEOUT', '用户消息上下文读取超时');
+      return timeout;
+    };
     const prefix = 'phone-turns-v1:';
     const turnCursor = cursor?.startsWith(prefix);
     if (this.itemsListSupported !== false && !turnCursor) {
       try {
         const page = record(
-          await this.rpc('thread/items/list', {
-            threadId,
-            limit: 60,
-            sortDirection: 'desc',
-            ...(cursor ? { cursor } : {}),
-          }),
+          await this.rpc(
+            'thread/items/list',
+            {
+              threadId,
+              limit: deadline === undefined ? 60 : 100,
+              sortDirection: 'desc',
+              ...(cursor ? { cursor } : {}),
+            },
+            false,
+            false,
+            remaining(),
+          ),
         );
         this.itemsListSupported = true;
         return page;
@@ -906,13 +1071,19 @@ export class CodexAdapter extends EventEmitter {
         throw new CodexError('INVALID_CURSOR', '历史游标无效，请刷新会话');
     }
     const turns = record(
-      await this.rpc('thread/turns/list', {
-        threadId,
-        limit: 10,
-        sortDirection: 'desc',
-        itemsView: 'full',
-        ...(nativeCursor ? { cursor: nativeCursor } : {}),
-      }),
+      await this.rpc(
+        'thread/turns/list',
+        {
+          threadId,
+          limit: 10,
+          sortDirection: 'desc',
+          itemsView: 'full',
+          ...(nativeCursor ? { cursor: nativeCursor } : {}),
+        },
+        false,
+        false,
+        remaining(),
+      ),
     );
     const data = array(turns.data).flatMap((value) => {
       const turn = record(value);
@@ -1351,8 +1522,9 @@ export class CodexAdapter extends EventEmitter {
     });
   }
 
-  private item(raw: ObjectValue, turnId: string): ConversationItem {
+  private item(raw: ObjectValue, turnId: string, startedAtMs?: unknown): ConversationItem {
     const type = str(raw.type, 'unknown');
+    const createdAt = itemTimestamp(startedAtMs);
     let text = '',
       role: ConversationItem['role'],
       images: string[] | undefined;
@@ -1434,6 +1606,7 @@ export class CodexAdapter extends EventEmitter {
       turnId,
       type,
       text,
+      ...(createdAt !== undefined ? { createdAt } : {}),
       ...(role ? { role } : {}),
       ...(str(raw.status) ? { status: str(raw.status) } : {}),
       ...(images?.length ? { images } : {}),
@@ -1528,7 +1701,11 @@ export class CodexAdapter extends EventEmitter {
       }
       case 'item/started':
       case 'item/completed': {
-        const item = this.item(record(params.item), turnId);
+        const item = this.item(
+          record(params.item),
+          turnId,
+          method === 'item/started' ? params.startedAtMs : undefined,
+        );
         this.items.set(`${threadId}:${item.id}`, item);
         this.event({ type: 'item.updated', threadId, item });
         return;

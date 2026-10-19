@@ -33,6 +33,7 @@ export interface ConversationItem {
   type: string;
   role?: 'user' | 'assistant';
   text: string;
+  createdAt?: number;
   status?: string;
   images?: string[];
 }
@@ -80,6 +81,7 @@ export interface SnapshotCursor {
 export interface ThreadSnapshot {
   thread: ThreadSummary;
   items: ConversationItem[];
+  contextUser?: ConversationItem;
   nextCursor: string | null;
   pendingRequests: PendingRequest[];
   settings?: SessionSettings;
